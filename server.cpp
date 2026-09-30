@@ -91,6 +91,13 @@ public:
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
+        int32_t written = 0;
+        Node* current = top;
+        while (current != nullptr and written < maxLen) {
+            out[written++] = current->data;
+            current = current->next;
+        }
+        return written;
         // copies every frame, top to bottom in the array given as a parameter
         // this is what buildSnapshot() call, returns count written
     }
@@ -179,19 +186,34 @@ string trimmed(string s) {
     auto first = s.find_first_not_of("  \t\r\n");
     if (first == string::npos)return "";
     auto last = s.find_first_not_of("  \t\r\n");
-    return s.substr(first, (last - first + 1);
+    return s.substr(first, (last - first + 1));
 }
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
-    string line;
-    while (getline(in, line)) {
-        string trim = trimmed(line);
-        if (!trim.empty()) {
-            out = trim;
-            return true;
+    string line="";
+    char ch;
+    while (in.get(ch)) {
+        if (ch == '\n' || ch == 10) {
+            size_t first = line.find_first_not_of(" \t\r");
+            if (first != string::npos) {
+                size_t last = line.find_last_not_of(" \t\r");
+                out = line.substr(first, (last - first + 1));
+                return true; 
+            }
+            line = ""; 
+        }
+        else if (ch != '\r' && ch != 13) {
+            line += ch;
         }
     }
+    size_t first = line.find_first_not_of(" \t\r");
+    if (first != string::npos) {
+        size_t last = line.find_last_not_of(" \t\r");
+        out = line.substr(first, (last - first + 1));
+        return true;
+    }
+
     out = "";
     return false;
     // reads the next nonblank line
@@ -228,10 +250,27 @@ string secondWord(const string& line)
     }
     return s;
 }
-}
 bool validateProgram(const char* sourcePath)
 {
-
+    ifstream in(sourcePath,ios::binary);
+    if (!in.is_open())return false;
+    string line;
+    Stack<string>callstack;
+    while (readSourceLine(in, line)) {
+        string first_word = firstWord(line);
+        if (first_word == "func") {
+            if (!callstack.isEmpty())return false;
+            // pushing the function name onto the stack now 
+            string second_word = secondWord(line);
+            callstack.push(second_word);
+        }
+        else if (first_word == "func_end") {
+            if (callstack.isEmpty())return false;
+             callstack.pop();
+        }
+    }
+    if (callstack.isEmpty())return true; // meaning that every func has a func_end
+    if (!callstack.isEmpty())return false; // no function end for a func start
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
 
