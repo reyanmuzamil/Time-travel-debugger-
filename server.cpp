@@ -182,12 +182,7 @@ struct PendingPatch
 };
 
 
-string trimmed(string s) {
-    auto first = s.find_first_not_of("  \t\r\n");
-    if (first == string::npos)return "";
-    auto last = s.find_first_not_of("  \t\r\n");
-    return s.substr(first, (last - first + 1));
-}
+
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
@@ -277,11 +272,40 @@ bool validateProgram(const char* sourcePath)
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
+    int64_t recordoffset = _ftelli64(f);
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    int32_t Stringsize = static_cast<int32_t>(text.size());
+    fwrite(&Stringsize, sizeof(int32_t), 1, f);
+    if (Stringsize > 0) {
+        fwrite(text.c_str(), sizeof(char), Stringsize, f);
+    }
+    return recordoffset;
+        // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
+    int64_t offset_field = -1;
+    int32_t Stringsize = 0;
+    // read the 8byte offset
+    if (fread(&offset_field, sizeof(int64_t), 1, f)!= 1) {
+        outText = "";
+        return -1;
+    }
+    // read 4 byte string size
+    if (fread(&Stringsize, sizeof(int32_t), 1, f) != 1) {
+        outText = "";
+        return -1;
+    }
+    // now read string
+    if (Stringsize > 0) {
+        outText.resize(Stringsize);
+        fread(&outText[0], sizeof(char), Stringsize, f);
+    }
+    else {
+        outText = "";
+    }
+    return offset_field;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
@@ -290,6 +314,43 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
+    ifstream in(sourcePath, ios::binary);
+    if (!in.is_open()) return -1;
+    FILE* f = fopen(resolveBinPath, "wb+");
+    if (!f) { 
+      in.close();
+      return -1;
+    }
+    string line;
+    int64_t totalRecordsWritten = 0;
+    while (readSourceLine(in, line)) {
+        string first = firstWord(line);
+        string second = secondWord(line);
+        int64_t targetoffset = -1;
+        if (first == "func") {
+            funcArray[funcCount].funcName = second;
+            funcArray[funcCount].byteOffsetInResolveBin = _ftelli64(f);
+            funcCount++;
+        }
+        else if (first == "call") {
+            for (int i = 0; i < funcCount; i++) {
+                if (funcArray[i].funcName == second) {
+                    targetoffset = funcArray[i].byteOffsetInResolveBin;
+                    break;
+                }
+            }
+        }
+        if (targetoffset == -1) {
+            patches[patchCount].targetFuncName = second;
+            patches[patchCount].byteOffsetOfOffsetField = _ftelli64(f);
+            patchCount++;
+        }
+        writeResolveRecord(f, targetoffset, line);
+        totalRecordsWritten++;
+    }
+    in.close();
+    fclose(f);
+    return totalRecordsWritten;
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs

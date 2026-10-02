@@ -125,6 +125,16 @@
   <ItemGroup>
     <Text Include="source.bin.txt" />
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="server.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="progress.md">
+      <SubType>
+      </SubType>
+    </None>
+    <None Include="resolver.bin" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

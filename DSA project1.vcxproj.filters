@@ -17,4 +17,15 @@
   <ItemGroup>
     <Text Include="source.bin.txt" />
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="server.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="progress.md" />
+    <None Include="resolver.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+  </ItemGroup>
 </Project>
