@@ -12,4 +12,18 @@
 ## commit2
 - **we have changed the readbinaryfile code a bit at first i thought the binary file will contain text so thats why i read it like that 
 - ** now we have changed it so now it read byte by byte 
-- ** we have also added the validation function which checks if the code written is valid ... i mean for every func there is a func_end and no nested functions _
+- ** we have also added the validation function which checks if the code written is valid ... i mean for every func there is a func_end and no nested functions 
+
+## commit 3
+-**We have done the stage 1 of this project here in which what we did is that first we wrote the resolver record into the file 
+-** then after that we wrote a function for reading it from the file and lastly we wrote resolverprogram function
+-** in this what we did is that we will check our line first word if its a "func" meaninf we will store its offset and name in the func array
+-** If its "call" then we will loop through the funcarray and then find the same name func from where we will get the byte offset
+-** if we didnot find the byte offset in resolve.bin then we will simply just added it in the patches array
+-** otherwise we will writeitinto the resolver.bin file
+## commit 4
+-** we wrote a function build snapshot in which first we create a snapshot object and then we will call our snapshot into method of stack
+-** we also created a destructor for stack
+
+## commit 5 
+-** in this commit we have written the tokenize line code in which we tokenize our line and give them types 

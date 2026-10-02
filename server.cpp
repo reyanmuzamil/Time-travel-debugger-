@@ -401,7 +401,7 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
             word += line[i];
         }
     }
-    // Process the final word at the end of the line
+    // Process  final word at the end of the line
     if (!word.empty() && count < maxTokens) {
         tokens[count].text = word;
         if (count == 0) tokens[count].type = KEYWORD;
