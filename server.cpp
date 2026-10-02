@@ -381,6 +381,35 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
+    string word = "";
+    int32_t count = 0;
+
+    for (size_t i = 0; i < line.size(); i++) {
+        if (line[i] == ' ' || line[i] == '\t') {
+            if (!word.empty()) {
+                if (count == maxTokens) return count;
+                tokens[count].text = word;
+                if (count == 0) tokens[count].type = KEYWORD; // first is keywprd
+                else if (count == 1) tokens[count].type = IDENTIFIER; // second word is identifier
+                else tokens[count].type = PARAM; // arguments 
+
+                count++;
+                word = ""; // Resetting word for next token
+            }
+        }
+        else {
+            word += line[i];
+        }
+    }
+    // Process the final word at the end of the line
+    if (!word.empty() && count < maxTokens) {
+        tokens[count].text = word;
+        if (count == 0) tokens[count].type = KEYWORD;
+        else if (count == 1) tokens[count].type = IDENTIFIER;
+        else tokens[count].type = PARAM;
+        count++;
+    }
+    return count;
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
