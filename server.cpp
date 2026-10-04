@@ -127,9 +127,14 @@ public:
     // Implement these functions
     Timeline()
     {
+        head = tail = nullptr;
+        stepCount = 0;
     }
     void record(Snapshot* s)
     {
+        if (stepCount == 0) {
+
+        }
         // add record in the timeline
     }
     TimelineNode* begin()
@@ -137,6 +142,7 @@ public:
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
@@ -424,14 +430,130 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+    FILE* f = nullptr;
+    fopen_s(&f, resolveBinPath, "rb");
+    if (!f) return;
+
+    Stack<Frame> Callstack;
+    Frame mainFrame;
+    mainFrame.func_name = "main";
+    mainFrame.argc = 0;
+    mainFrame.returnLine = -1;
+    mainFrame.localCount = 0;
+    Callstack.push(mainFrame);
+
+    if (mainOffset >= 0) {
+        _fseeki64(f, mainOffset, SEEK_SET);
+    }
+
+    string lineText;
+    Token tokens[10];
+
+    while (!Callstack.isEmpty()) {
+        int64_t currentFilePos = _ftelli64(f);
+
+        int64_t targetOffset = readResolveRecord(f, lineText);
+        if (lineText.empty()) break; 
+
+        int32_t tokenCount = tokenizeLine(lineText, tokens, 10);
+        if (tokenCount == 0) continue;
+
+        string op = tokens[0].text; 
+        Frame& currentFrame = Callstack.peek(); 
+        if (op == "set") {
+            string varName = tokens[1].text;
+            int32_t val = stoi(tokens[2].text);
+            bool found = false;
+            for (int i = 0; i < currentFrame.localCount; i++) {
+                if (currentFrame.locals[i].name == varName) {
+                    currentFrame.locals[i].value = val;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found && currentFrame.localCount < MAX_VARS_PER_FRAME) {
+                currentFrame.locals[currentFrame.localCount++] = { varName, val };
+            }
+        }
+        else if (op == "add" || op == "sub" || op == "mul" || op == "div") {
+            string destVar = tokens[1].text;
+            int32_t val1 = stoi(tokens[2].text);
+            int32_t val2 = stoi(tokens[3].text);
+
+            int32_t result = 0;
+            if (op == "add") result = val1 + val2;
+            else if (op == "sub") result = val1 - val2;
+            else if (op == "mul") result = val1 * val2;
+            else if (op == "div" && val2 != 0) result = val1 / val2;
+            bool found = false;
+            for (int i = 0; i < currentFrame.localCount; i++) {
+                if (currentFrame.locals[i].name == destVar) {
+                    currentFrame.locals[i].value = result;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && currentFrame.localCount < MAX_VARS_PER_FRAME) {
+                currentFrame.locals[currentFrame.localCount++] = { destVar, result };
+            }
+        }
+        else if (op == "call") {
+            string targetFuncName = tokens[1].text;
+
+            // Calculate return address 
+            int64_t returnPos = _ftelli64(f);
+
+            //  Build the new function Frame
+            Frame newFrame;
+            newFrame.func_name = targetFuncName;
+            newFrame.returnLine = returnPos; // Save offset to return to later
+            newFrame.localCount = 0;
+            newFrame.argc = 0;
+
+            //  Bind positional arguments passed to the function
+            for (int i = 2; i < tokenCount && newFrame.argc < MAX_VARS_PER_FRAME; i++) {
+                string argName = "arg" + to_string(i - 2);
+                int32_t argVal = stoi(tokens[i].text);
+                newFrame.argv[newFrame.argc++] = { argName, argVal };
+            }
+
+            //  Push new frame and jump to resolved target offset in resolve.bin
+            Callstack.push(newFrame);
+            if (targetOffset >= 0) {
+                _fseeki64(f, targetOffset, SEEK_SET);
+            }
+        }
+        else if (op == "func_end") {
+            int64_t returnAddress = currentFrame.returnLine;
+
+            // Pop active frame off the execution call stack
+            Callstack.pop();
+
+            // If returning from a nested call, jump back to return address
+            if (returnAddress != -1) {
+                _fseeki64(f, returnAddress, SEEK_SET);
+            }
+            else {
+                // Return from root "main" frame -> execution complete
+                break;
+            }
+        }
+
+        // Step D: Capture Snapshot and Append to Timeline
+        Snapshot* s = buildSnapshot(Callstack);
+        timeline.record(s);
+    }
+        // Snapshotting and Jumps (call / func_end) will attach right after this
+    fclose(f);
+}
     // initialize the call stack
     // make the main frame
     // push main frame on the call stack
 
     // implementation:
     // execute line by line, and according to the keyword perform action
-}
-
+   
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
