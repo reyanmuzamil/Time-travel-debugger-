@@ -117,6 +117,10 @@ struct TimelineNode
     Snapshot* data;
     TimelineNode* next;
     TimelineNode* prev;
+    TimelineNode(Snapshot* s1) {
+        data = s1;
+        next = prev = nullptr;
+    }
 };
 class Timeline
 {
@@ -130,15 +134,34 @@ public:
         head = tail = nullptr;
         stepCount = 0;
     }
+    ~Timeline()
+    {
+        TimelineNode* current = head;
+        while (current != nullptr) {
+            TimelineNode* nextNode = current->next;
+            delete current->data; 
+            delete current;  
+            current = nextNode;
+        }
+    }
     void record(Snapshot* s)
     {
+        TimelineNode* temp = new TimelineNode(s);
         if (stepCount == 0) {
+            head = tail = temp;
+            stepCount++;
+            return;
 
         }
+        tail->next = temp;
+        temp->prev = tail;
+        tail = temp;
+        stepCount++;
         // add record in the timeline
     }
     TimelineNode* begin()
     {
+        return head;
     }
     int32_t getStepCount()
     {
