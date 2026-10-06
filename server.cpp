@@ -524,24 +524,18 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         else if (op == "call") {
             string targetFuncName = tokens[1].text;
 
-            // Calculate return address 
             int64_t returnPos = _ftelli64(f);
 
-            //  Build the new function Frame
             Frame newFrame;
             newFrame.func_name = targetFuncName;
-            newFrame.returnLine = returnPos; // Save offset to return to later
+            newFrame.returnLine = returnPos; 
             newFrame.localCount = 0;
             newFrame.argc = 0;
-
-            //  Bind positional arguments passed to the function
             for (int i = 2; i < tokenCount && newFrame.argc < MAX_VARS_PER_FRAME; i++) {
                 string argName = "arg" + to_string(i - 2);
                 int32_t argVal = stoi(tokens[i].text);
                 newFrame.argv[newFrame.argc++] = { argName, argVal };
             }
-
-            //  Push new frame and jump to resolved target offset in resolve.bin
             Callstack.push(newFrame);
             if (targetOffset >= 0) {
                 _fseeki64(f, targetOffset, SEEK_SET);
@@ -549,25 +543,17 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         }
         else if (op == "func_end") {
             int64_t returnAddress = currentFrame.returnLine;
-
-            // Pop active frame off the execution call stack
             Callstack.pop();
-
-            // If returning from a nested call, jump back to return address
             if (returnAddress != -1) {
                 _fseeki64(f, returnAddress, SEEK_SET);
             }
             else {
-                // Return from root "main" frame -> execution complete
                 break;
             }
         }
-
-        // Step D: Capture Snapshot and Append to Timeline
         Snapshot* s = buildSnapshot(Callstack);
         timeline.record(s);
     }
-        // Snapshotting and Jumps (call / func_end) will attach right after this
     fclose(f);
 }
     // initialize the call stack
@@ -578,13 +564,91 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     // execute line by line, and according to the keyword perform action
    
 // PASS 0x3: SERIALIZE TIMELINE
-void writeTdbg(Timeline& timeline, const char* tdbgPath)
+bool writeTdbg( Timeline& timeline, const char *traceBinPath)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    FILE* f = nullptr;
+    fopen_s(&f, traceBinPath, "wb+");
+    if (!f) return false;
+
+    int32_t totalSteps = timeline.getStepCount();
+
+    TTDBHeader header;
+    header.magic[0] = 'T';
+    header.magic[1] = 'T';
+    header.magic[2] = 'D';
+    header.magic[3] = 'B';
+    header.version = 1;
+    header.stepCount = totalSteps;
+    header.indexOffset = 0; 
+
+    fwrite(&header, sizeof(TTDBHeader), 1, f);
+
+    // Array to hold the file position of each snapshot for the index table
+    int64_t* stepOffsets = new int64_t[totalSteps];
+    int32_t stepIndex = 0;
+
+    TimelineNode* current = timeline.begin();
+
+    while (current != nullptr && stepIndex < totalSteps) {
+        // Record current disk offset for Step 3's Index Table
+        stepOffsets[stepIndex++] = _ftelli64(f);
+
+        Snapshot* s = current->data;
+
+        // Write stack depth for this snapshot
+        fwrite(&(s->stackDepth), sizeof(int32_t), 1, f);
+
+        // Serialize each frame in the snapshot's call stack
+        for (int32_t i = 0; i < s->stackDepth; i++) {
+            Frame& frame = s->callStack[i];
+
+            //  Write Function Name
+            int32_t nameLen = (int32_t)frame.func_name.size();
+            fwrite(&nameLen, sizeof(int32_t), 1, f);
+            if (nameLen > 0) {
+                fwrite(frame.func_name.c_str(), sizeof(char), nameLen, f);
+            }
+
+            //  Return Line / Offset
+            fwrite(&(frame.returnLine), sizeof(int32_t), 1, f);
+
+            // Positional Arguments 
+            fwrite(&(frame.argc), sizeof(int32_t), 1, f);
+            for (int32_t a = 0; a < frame.argc; a++) {
+                int32_t argNameLen = (int32_t)frame.argv[a].name.size();
+                fwrite(&argNameLen, sizeof(int32_t), 1, f);
+                if (argNameLen > 0) {
+                    fwrite(frame.argv[a].name.c_str(), sizeof(char), argNameLen, f);
+                }
+                fwrite(&(frame.argv[a].value), sizeof(int32_t), 1, f);
+            }
+
+            // Local Variables
+            fwrite(&(frame.localCount), sizeof(int32_t), 1, f);
+            for (int32_t v = 0; v < frame.localCount; v++) {
+                int32_t varNameLen = (int32_t)frame.locals[v].name.size();
+                fwrite(&varNameLen, sizeof(int32_t), 1, f);
+                if (varNameLen > 0) {
+                    fwrite(frame.locals[v].name.c_str(), sizeof(char), varNameLen, f);
+                }
+                fwrite(&(frame.locals[v].value), sizeof(int32_t), 1, f);
+            }
+        }
+
+        current = current->next;
+    }
+
+    int64_t indexTableStart = _ftelli64(f);
+    if (totalSteps > 0) {
+        fwrite(stepOffsets, sizeof(int64_t), totalSteps, f);
+    }
+    _fseeki64(f, 0, SEEK_SET);
+    fwrite(&header, sizeof(TTDBHeader), 1, f);
+
+    delete[] stepOffsets;
+    fclose(f);
+
+    return true;
 }
 // main section
 int32_t main()
