@@ -283,24 +283,38 @@ string secondWord(const string& line)
 bool validateProgram(const char* sourcePath)
 {
     ifstream in(sourcePath,ios::binary);
-    if (!in.is_open())return false;
+    if (!in.is_open())throw runtime_error("Error couldnot open source file" +string(sourcePath) +" .");
     string line;
     Stack<string>callstack;
+    int32_t lineNumber = 0;
     while (readSourceLine(in, line)) {
         string first_word = firstWord(line);
+        lineNumber++;
         if (first_word == "func") {
-            if (!callstack.isEmpty())return false;
+            if (!callstack.isEmpty()) {
+                in.close();
+                throw runtime_error("Syntax Error [Line " + to_string(lineNumber) + "]: nested function definition '" + secondWord(line) + "' inside '" + callstack.peek() + "' is not allowed.");
+            }
             // pushing the function name onto the stack now 
             string second_word = secondWord(line);
+            if (second_word.empty()) {
+                in.close();
+                throw runtime_error("Syntax Error [Line " + to_string(lineNumber) +"]: 'func' keyword missing function identifier name.");
+            }
             callstack.push(second_word);
+
         }
         else if (first_word == "func_end") {
-            if (callstack.isEmpty())return false;
+            if (callstack.isEmpty()){
+                in.close();
+                throw runtime_error("syntax error [Line " + to_string(lineNumber) + "]: Unmatched 'func_end' without a preceding 'func' declaration.");
+            }
              callstack.pop();
         }
     }
-    if (callstack.isEmpty())return true; // meaning that every func has a func_end
-    if (!callstack.isEmpty())return false; // no function end for a func start
+    in.close();
+    if (!callstack.isEmpty())throw runtime_error("Syntax Error: Function '" + callstack.peek() +"' was never closed with 'func_end' before end-of-file."); //no function end for a func start
+    return true;
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
 
@@ -350,40 +364,97 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
     ifstream in(sourcePath, ios::binary);
-    if (!in.is_open()) return -1;
-    FILE* f = fopen(resolveBinPath, "wb+");
-    if (!f) { 
-      in.close();
-      return -1;
+    if (!in.is_open()) {
+        throw runtime_error("Linker Error Could not open source file '" + string(sourcePath) + "'.");
     }
+    FILE* f = nullptr;
+    fopen_s(&f, resolveBinPath, "wb+");
+    if (!f) {
+        in.close();
+        throw runtime_error("Linker Error Could not create binary file at path '" + string(resolveBinPath) + "'. Check write permissions.");
+    }
+
     string line;
     int64_t totalRecordsWritten = 0;
+
+    //  Record Functions, Patch Targets, and Write Binary Records
     while (readSourceLine(in, line)) {
         string first = firstWord(line);
         string second = secondWord(line);
-        int64_t targetoffset = -1;
+        int64_t targetOffset = -1;
+
         if (first == "func") {
+            //  Exceeded maximum function symbol capacity
+            if (funcCount >= MAX_FUNCS) {
+                in.close();
+                fclose(f);
+                throw runtime_error("Linker Error Exceeded maximum allowed functions limit (" + to_string(MAX_FUNCS) + ").");
+            }
+
+            //  Duplicate function definition
+            for (int i = 0; i < funcCount; i++) {
+                if (funcArray[i].funcName == second) {
+                    in.close();
+                    fclose(f);
+                    throw runtime_error("Linker Error Duplicate function definition '" + second + "' encountered.");
+                }
+            }
+
             funcArray[funcCount].funcName = second;
             funcArray[funcCount].byteOffsetInResolveBin = _ftelli64(f);
             funcCount++;
         }
         else if (first == "call") {
+            // if target function was already defined earlier in source
             for (int i = 0; i < funcCount; i++) {
                 if (funcArray[i].funcName == second) {
-                    targetoffset = funcArray[i].byteOffsetInResolveBin;
+                    targetOffset = funcArray[i].byteOffsetInResolveBin;
                     break;
                 }
             }
+
+            // Forward call reference -> record pending patch
+            if (targetOffset == -1) {
+                //  Exceeded maximum pending forward patch capacity
+                if (patchCount >= MAX_PATCHES) {
+                    in.close();
+                    fclose(f);
+                    throw runtime_error("Linker Error Exceeded maximum forward calls limit (" + to_string(MAX_PATCHES) + ").");
+                }
+
+                patches[patchCount].targetFuncName = second;
+                patches[patchCount].byteOffsetOfOffsetField = _ftelli64(f);
+                patchCount++;
+            }
         }
-        if (targetoffset == -1) {
-            patches[patchCount].targetFuncName = second;
-            patches[patchCount].byteOffsetOfOffsetField = _ftelli64(f);
-            patchCount++;
-        }
-        writeResolveRecord(f, targetoffset, line);
+
+        writeResolveRecord(f, targetOffset, line);
         totalRecordsWritten++;
     }
+
     in.close();
+
+    // Backpatch Forward Calls to Resolved Offsets
+    for (int i = 0; i < patchCount; i++) {
+        int64_t resolvedOffset = -1;
+        for (int j = 0; j < funcCount; j++) {
+            if (funcArray[j].funcName == patches[i].targetFuncName) {
+                resolvedOffset = funcArray[j].byteOffsetInResolveBin;
+                break;
+            }
+        }
+
+        // Function called in program but never defined
+        if (resolvedOffset == -1) {
+            fclose(f);
+            throw runtime_error("Linker Error Unresolved reference to function '" + patches[i].targetFuncName + "'.");
+        }
+
+        // Backpatch the 8-byte targetOffset field in resolve.bin
+        _fseeki64(f, patches[i].byteOffsetOfOffsetField, SEEK_SET);
+        fwrite(&resolvedOffset, sizeof(int64_t), 1, f);
+    }
+
     fclose(f);
     return totalRecordsWritten;
     // Every source line becomes one record holding the raw line, as-is.
@@ -721,14 +792,17 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     // execute line by line, and according to the keyword perform action
    
 // PASS 0x3: SERIALIZE TIMELINE
-bool writeTdbg( Timeline& timeline, const char *traceBinPath)
+bool writeTdbg(Timeline& timeline, const char* traceBinPath)
 {
     FILE* f = nullptr;
     fopen_s(&f, traceBinPath, "wb+");
-    if (!f) return false;
+    if (!f) throw runtime_error("IO Error unable to create trace binary file at path '" + string(traceBinPath) + ". Check write permissions.");
 
     int32_t totalSteps = timeline.getStepCount();
-
+    if (totalSteps == 0) {
+        fclose(f);
+        throw runtime_error("Warning Attempt to write the trace file with 0  recorded steps ");
+    }
     TTDBHeader header;
     header.magic[0] = 'T';
     header.magic[1] = 'T';
@@ -736,7 +810,7 @@ bool writeTdbg( Timeline& timeline, const char *traceBinPath)
     header.magic[3] = 'B';
     header.version = 1;
     header.stepCount = totalSteps;
-    header.indexOffset = 0; 
+    header.indexOffset = 0;
 
     fwrite(&header, sizeof(TTDBHeader), 1, f);
 
@@ -759,14 +833,14 @@ bool writeTdbg( Timeline& timeline, const char *traceBinPath)
         for (int32_t i = 0; i < s->stackDepth; i++) {
             Frame& frame = s->callStack[i];
 
-            //  Write Function Name
+            // Write Function Name
             int32_t nameLen = (int32_t)frame.func_name.size();
             fwrite(&nameLen, sizeof(int32_t), 1, f);
             if (nameLen > 0) {
                 fwrite(frame.func_name.c_str(), sizeof(char), nameLen, f);
             }
 
-            //  Return Line / Offset
+            // Return Line / Offset
             fwrite(&(frame.returnLine), sizeof(int32_t), 1, f);
 
             // Positional Arguments 
@@ -799,6 +873,9 @@ bool writeTdbg( Timeline& timeline, const char *traceBinPath)
     if (totalSteps > 0) {
         fwrite(stepOffsets, sizeof(int64_t), totalSteps, f);
     }
+
+    //  Backpatch header.indexOffset with the actual index table offset
+    header.indexOffset = indexTableStart;
     _fseeki64(f, 0, SEEK_SET);
     fwrite(&header, sizeof(TTDBHeader), 1, f);
 

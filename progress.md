@@ -36,3 +36,5 @@
 -** This is hopefully our lastcommit what we did in this is that we wrote our lastfucntion writetdbg
 # COMMIT 9
 --* In this new commit i have made some chnages in my execute program after checking that my previous code had some problems + it doesnot give us errors now in this I have added run time errors
+# COMMIT 10
+--* IN THIS COMMIT WE HAVE ADDED RUN TIME ERROR IN ALL THE PLACES WHERE ERROR COULD HAPPEN IN THE CODE 
