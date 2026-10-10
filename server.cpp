@@ -455,108 +455,265 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 {
     FILE* f = nullptr;
     fopen_s(&f, resolveBinPath, "rb");
-    if (!f) return;
 
-    Stack<Frame> Callstack;
+    if (!f) {
+        throw runtime_error("Runtime Error could not open binary file '" + string(resolveBinPath) + "'.");
+    }
+
+    // Main entry Point Validation
+    if (mainOffset < 0) {
+        fclose(f);
+        throw runtime_error("Runtime Error invalid main entry point offset (" + to_string(mainOffset) + ").");
+    }
+
+    Stack<Frame> call_stack;
+
+    // initialize Base main Frame
     Frame mainFrame;
     mainFrame.func_name = "main";
     mainFrame.argc = 0;
     mainFrame.returnLine = -1;
     mainFrame.localCount = 0;
-    Callstack.push(mainFrame);
 
-    if (mainOffset >= 0) {
-        _fseeki64(f, mainOffset, SEEK_SET);
-    }
+    call_stack.push(mainFrame);
 
-    string lineText;
-    Token tokens[10];
+    // Jump to the main function entry point in resolve.bin
+    _fseeki64(f, mainOffset, SEEK_SET);
 
-    while (!Callstack.isEmpty()) {
-        int64_t currentFilePos = _ftelli64(f);
+    while (!call_stack.isEmpty()) {
+        if (call_stack.depth() >= MAX_STACK_DEPTH) {
+            fclose(f);
+            throw runtime_error("Stack Overflow Error exceeded maximum call stack depth (" +to_string(MAX_STACK_DEPTH) + ") in function '" +call_stack.peek().func_name + "'.");
+        }
 
-        int64_t targetOffset = readResolveRecord(f, lineText);
-        if (lineText.empty()) break; 
+        Token tokens[MAX_TOKENS];
+        string line = "";
 
-        int32_t tokenCount = tokenizeLine(lineText, tokens, 10);
-        if (tokenCount == 0) continue;
+        // Read binary record 
+        int64_t targetOffset = readResolveRecord(f, line);
 
-        string op = tokens[0].text; 
-        Frame& currentFrame = Callstack.peek(); 
+        if (line.empty()) {
+            break; // End of file reached
+        }
+
+        int32_t token_count = tokenizeLine(line, tokens, MAX_TOKENS);
+
+        if (token_count == 0) {
+            continue;
+        }
+
+        string op = tokens[0].text;
+        Frame& currentFrame = call_stack.peek();
+        // SET INSTRUCTION 
         if (op == "set") {
-            string varName = tokens[1].text;
-            int32_t val = stoi(tokens[2].text);
-            bool found = false;
-            for (int i = 0; i < currentFrame.localCount; i++) {
-                if (currentFrame.locals[i].name == varName) {
-                    currentFrame.locals[i].value = val;
-                    found = true;
-                    break;
+            if (token_count < 3) {
+                fclose(f);
+                throw runtime_error("Syntax Error 'set' instruction requires variable name and value.");
+            }
+
+            string var_name = tokens[1].text;
+            int32_t val = 0;
+            try {
+                val = stoi(tokens[2].text);
+            }
+            catch (...) {
+                fclose(f);
+                throw runtime_error("Runtime Error invalid integer value '" + tokens[2].text + "' for set instruction.");
+            }
+
+            Variable* destVar = nullptr;
+            for (int i = 0; i < currentFrame.argc; i++) {
+                if (currentFrame.argv[i].name == var_name) { destVar = &currentFrame.argv[i]; break; }
+            }
+            if (!destVar) {
+                for (int i = 0; i < currentFrame.localCount; i++) {
+                    if (currentFrame.locals[i].name == var_name) { destVar = &currentFrame.locals[i]; break; }
                 }
             }
 
-            if (!found && currentFrame.localCount < MAX_VARS_PER_FRAME) {
-                currentFrame.locals[currentFrame.localCount++] = { varName, val };
-            }
-        }
-        else if (op == "add" || op == "sub" || op == "mul" || op == "div") {
-            string destVar = tokens[1].text;
-            int32_t val1 = stoi(tokens[2].text);
-            int32_t val2 = stoi(tokens[3].text);
-
-            int32_t result = 0;
-            if (op == "add") result = val1 + val2;
-            else if (op == "sub") result = val1 - val2;
-            else if (op == "mul") result = val1 * val2;
-            else if (op == "div" && val2 != 0) result = val1 / val2;
-            bool found = false;
-            for (int i = 0; i < currentFrame.localCount; i++) {
-                if (currentFrame.locals[i].name == destVar) {
-                    currentFrame.locals[i].value = result;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && currentFrame.localCount < MAX_VARS_PER_FRAME) {
-                currentFrame.locals[currentFrame.localCount++] = { destVar, result };
-            }
-        }
-        else if (op == "call") {
-            string targetFuncName = tokens[1].text;
-
-            int64_t returnPos = _ftelli64(f);
-
-            Frame newFrame;
-            newFrame.func_name = targetFuncName;
-            newFrame.returnLine = returnPos; 
-            newFrame.localCount = 0;
-            newFrame.argc = 0;
-            for (int i = 2; i < tokenCount && newFrame.argc < MAX_VARS_PER_FRAME; i++) {
-                string argName = "arg" + to_string(i - 2);
-                int32_t argVal = stoi(tokens[i].text);
-                newFrame.argv[newFrame.argc++] = { argName, argVal };
-            }
-            Callstack.push(newFrame);
-            if (targetOffset >= 0) {
-                _fseeki64(f, targetOffset, SEEK_SET);
-            }
-        }
-        else if (op == "func_end") {
-            int64_t returnAddress = currentFrame.returnLine;
-            Callstack.pop();
-            if (returnAddress != -1) {
-                _fseeki64(f, returnAddress, SEEK_SET);
+            if (destVar != nullptr) {
+                destVar->value = val;
             }
             else {
-                break;
+                if (currentFrame.localCount >= MAX_VARS_PER_FRAME) {
+                    fclose(f);
+                    throw runtime_error("Runtime Error exceeded local variable limit (" +to_string(MAX_VARS_PER_FRAME) + ") in frame '" + currentFrame.func_name + "'.");
+                }
+                currentFrame.locals[currentFrame.localCount].name = var_name;
+                currentFrame.locals[currentFrame.localCount].value = val;
+                currentFrame.localCount++;
             }
         }
-        Snapshot* s = buildSnapshot(Callstack);
-        timeline.record(s);
+
+        //  ARITHMETIC INSTRUCTIONS
+        else if (op == "add" || op == "sub" || op == "mul" || op == "div") {
+            if (token_count < 3) {
+                fclose(f);
+                throw runtime_error("Syntax Error arithmetic '" + op + "' requires destination variable and operand.");
+            }
+
+            string dest_name = tokens[1].text;
+            string src_name = tokens[2].text;
+
+            // Resolve destination variable
+            Variable* destVar = nullptr;
+            for (int i = 0; i < currentFrame.argc; i++) {
+                if (currentFrame.argv[i].name == dest_name) { destVar = &currentFrame.argv[i]; break; }
+            }
+            if (!destVar) {
+                for (int i = 0; i < currentFrame.localCount; i++) {
+                    if (currentFrame.locals[i].name == dest_name) { destVar = &currentFrame.locals[i]; break; }
+                }
+            }
+
+            if (destVar == nullptr) {
+                fclose(f);
+                throw runtime_error("Runtime Error destination variable '" + dest_name +"' is not defined in frame '" + currentFrame.func_name + "'.");
+            }
+
+            // Resolve source operand
+            Variable* srcVar = nullptr;
+            for (int i = 0; i < currentFrame.argc; i++) {
+                if (currentFrame.argv[i].name == src_name) { srcVar = &currentFrame.argv[i]; break; }
+            }
+            if (!srcVar) {
+                for (int i = 0; i < currentFrame.localCount; i++) {
+                    if (currentFrame.locals[i].name == src_name) { srcVar = &currentFrame.locals[i]; break; }
+                }
+            }
+
+            int32_t src_val = 0;
+            if (srcVar != nullptr) {
+                src_val = srcVar->value;
+            }
+            else {
+                try {
+                    src_val = stoi(src_name);
+                }
+                catch (...) {
+                    fclose(f);
+                    throw runtime_error("Runtime Error symbol '" + src_name + "' is neither a valid variable nor integer literal.");
+                }
+            }
+
+            if (op == "add") {
+                destVar->value += src_val;
+            }
+            else if (op == "sub") {
+                destVar->value -= src_val;
+            }
+            else if (op == "mul") {
+                destVar->value *= src_val;
+            }
+            else if (op == "div") {
+                //  Division by zero
+                if (src_val == 0) {
+                    fclose(f);
+                    throw runtime_error("Math Error Division by zero  is not possible its encounted in frame '" + currentFrame.func_name + "'.");
+                }
+                destVar->value /= src_val;
+            }
+        }
+
+        //  CALL INSTRUCTION 
+        else if (op == "call") {
+            if (token_count < 2) {
+                fclose(f);
+                throw runtime_error("Syntax Error 'call' instruction missing target function name.");
+            }
+
+            if (targetOffset < 0) {
+                fclose(f);
+                throw runtime_error("Linker Error  unresolved jump target for function '" + tokens[1].text + "'.");
+            }
+
+            Frame new_frame;
+            new_frame.func_name = tokens[1].text;
+            new_frame.localCount = 0;
+            new_frame.argc = 0;
+            new_frame.returnLine = (int32_t)_ftelli64(f); // Save return offset
+
+            // Bind function call parameters
+            for (int i = 2; i < token_count; i++) {
+                if (new_frame.argc >= MAX_VARS_PER_FRAME) {
+                    fclose(f);
+                    throw runtime_error("Runtime Error exceeded maximum argument limit for function '" + new_frame.func_name + "'.");
+                }
+
+                string argName = tokens[i].text;
+                Variable* argVar = nullptr;
+
+                for (int j = 0; j < currentFrame.argc; j++) {
+                    if (currentFrame.argv[j].name == argName) { argVar = &currentFrame.argv[j]; break; }
+                }
+                if (!argVar) {
+                    for (int j = 0; j < currentFrame.localCount; j++) {
+                        if (currentFrame.locals[j].name == argName) { argVar = &currentFrame.locals[j]; break; }
+                    }
+                }
+
+                int32_t val = 0;
+                if (argVar != nullptr) {
+                    val = argVar->value;
+                }
+                else {
+                    try {
+                        val = stoi(argName);
+                    }
+                    catch (...) {
+                        fclose(f);
+                        throw runtime_error("Runtime Error argument '" + argName + "' passed to '" + new_frame.func_name + "' is invalid.");
+                    }
+                }
+                new_frame.argv[new_frame.argc].name = "arg" + to_string(new_frame.argc);
+                new_frame.argv[new_frame.argc].value = val;
+                new_frame.argc++;
+            }
+
+            call_stack.push(new_frame);
+            _fseeki64(f, targetOffset, SEEK_SET);
+        }
+
+        //  FUNC HEADER INSTRUCTION 
+        else if (op == "func") {
+            int expArgc = token_count - 2;
+            if (currentFrame.argc != expArgc) {
+                fclose(f);
+                throw runtime_error("Runtime Error argument count mismatch for '" + currentFrame.func_name +"'. Expected " + to_string(expArgc) + ", got " + to_string(currentFrame.argc) + ".");
+            }
+
+            // Bind names to passed argument values
+            for (int i = 2; i < token_count; i++) {
+                currentFrame.argv[i - 2].name = tokens[i].text;
+            }
+        }
+
+        //  FUNC_END INSTRUCTION 
+        else if (op == "func_end") {
+            int32_t address = currentFrame.returnLine;
+            call_stack.pop();
+
+            if (address != -1) {
+                _fseeki64(f, address, SEEK_SET);
+            }
+            else {
+                break; // Exit loop when pops
+            }
+        }
+
+        //  UNRECOGNIZED INSTRUCTION CHECK
+        else {
+            fclose(f);
+            throw runtime_error("Runtime Execution Error invalid or unrecognized instruction '" + op + "'.");
+        }
+
+        // Record execution step into timeline
+        Snapshot* ss = buildSnapshot(call_stack);
+        timeline.record(ss);
     }
+
     fclose(f);
-}
-    // initialize the call stack
+}    // initialize the call stack
     // make the main frame
     // push main frame on the call stack
 
