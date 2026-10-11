@@ -1,0 +1,16 @@
+# Ignore Visual Studio Build Outputs
+x64/
+Debug/
+Release/
+*.exe
+*.ilk
+*.pdb
+*.tlog
+
+# Ignore Time-Travel Debugger Generated Binary Artifacts
+*.bin
+*.tdbg
+
+# Ignore Visual Studio User Configuration
+.vs/
+*.vcxproj.user
