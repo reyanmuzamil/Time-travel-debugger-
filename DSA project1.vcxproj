@@ -134,6 +134,8 @@
       </SubType>
     </None>
     <None Include="resolver.bin" />
+    <None Include="session.tdbg" />
+    <None Include="Source.bin" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -1,0 +1,14 @@
+func main
+set x 100
+set y 20
+call compute x y
+set final_flag 1
+func_end
+
+func compute num1 num2
+set total 0
+add total num1
+add total num2
+set divisor 0
+div total divisor
+func_end

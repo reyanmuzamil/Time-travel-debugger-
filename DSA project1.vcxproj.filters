@@ -27,5 +27,9 @@
     <None Include="resolver.bin">
       <Filter>Resource Files</Filter>
     </None>
+    <None Include="Source.bin">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="session.tdbg" />
   </ItemGroup>
 </Project>

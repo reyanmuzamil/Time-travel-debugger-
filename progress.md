@@ -38,3 +38,6 @@
 --* In this new commit i have made some chnages in my execute program after checking that my previous code had some problems + it doesnot give us errors now in this I have added run time errors
 # COMMIT 10
 --* IN THIS COMMIT WE HAVE ADDED RUN TIME ERROR IN ALL THE PLACES WHERE ERROR COULD HAPPEN IN THE CODE 
+# Commit 11
+--* In this commit we have made quite alot of changes like i have changed some parts of my error where i was getting error today after testing and we have also created a new main which catches the error and i have created a function which prints output onto consolve for my understanding 
+

@@ -1,21 +1,27 @@
-// ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
+﻿// ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
 
 // Pipeline this file implements, top to bottom:
-//   0. Receive  -- stream the client's .trace bytes straight to source.bin on disk
+//   0. Receive  -- stream the client's .trace bytes straight to Source.bin on disk
 //   1. Pass 0X0   -- validity check (FUNC/FUNC_END matching)
-//   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
-//   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
+//   2. Pass 0X1   -- resolve(): copy EVERY source line into resolver.bin as [offset][size][string], then patch CALL targets.
+//   3. Pass 0X2   -- execute resolver.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
 
-
+#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <string>
 #include <cstdint>
 #include <fstream>
-#include <unistd.h>
-#include <sys/socket.h>
+//#include <unistd.h>
+//#include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
+#include <stdexcept>
+#ifdef _WIN32
+#define fseeko _fseeki64
+#define ftello _ftelli64
+#endif
+
 using namespace std;
 
 // ---- Constants ----
@@ -139,8 +145,8 @@ public:
         TimelineNode* current = head;
         while (current != nullptr) {
             TimelineNode* nextNode = current->next;
-            delete current->data; 
-            delete current;  
+            delete current->data;
+            delete current;
             current = nextNode;
         }
     }
@@ -200,11 +206,11 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
     fwrite(&h.version, sizeof(int32_t), 1, f);
-
-    // placeholder for other two data members
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
 
-// resolve.bin - bookkeeping
+// resolver.bin - bookkeeping
 struct FuncEntry
 {
     string funcName;
@@ -212,16 +218,16 @@ struct FuncEntry
 };
 struct PendingPatch
 {
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
+    int64_t byteOffsetOfOffsetField; // where in resolver.bin to seek back and overwrite
     string targetFuncName;
 };
 
 
 
-// PASS 0x0: READING source.bin + VALIDITY CHECK
+// PASS 0x0: READING Source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
-    string line="";
+    string line = "";
     char ch;
     while (in.get(ch)) {
         if (ch == '\n' || ch == 10) {
@@ -229,9 +235,9 @@ bool readSourceLine(ifstream& in, string& out)
             if (first != string::npos) {
                 size_t last = line.find_last_not_of(" \t\r");
                 out = line.substr(first, (last - first + 1));
-                return true; 
+                return true;
             }
-            line = ""; 
+            line = "";
         }
         else if (ch != '\r' && ch != 13) {
             line += ch;
@@ -251,7 +257,7 @@ bool readSourceLine(ifstream& in, string& out)
 string firstWord(const string& line)
 {
     string s = "";
-    for (int i = 0; i < line.size(); i++) {
+    for (size_t i = 0; i < line.size(); i++) {
         if (line[i] != ' ')s += line[i];
         else {
             break;
@@ -265,7 +271,7 @@ string secondWord(const string& line)
     int count = 0;
     string s = "";
 
-    for (int i = 0; i < line.size(); i++) {
+    for (size_t i = 0; i < line.size(); i++) {
         if (line[i] == ' ') {
             if (count == 0) count = 1;
             else if (count == 2) return s;
@@ -282,8 +288,8 @@ string secondWord(const string& line)
 }
 bool validateProgram(const char* sourcePath)
 {
-    ifstream in(sourcePath,ios::binary);
-    if (!in.is_open())throw runtime_error("Error couldnot open source file" +string(sourcePath) +" .");
+    ifstream in(sourcePath, ios::binary);
+    if (!in.is_open())throw runtime_error("Error couldnot open source file" + string(sourcePath) + " .");
     string line;
     Stack<string>callstack;
     int32_t lineNumber = 0;
@@ -299,29 +305,29 @@ bool validateProgram(const char* sourcePath)
             string second_word = secondWord(line);
             if (second_word.empty()) {
                 in.close();
-                throw runtime_error("Syntax Error [Line " + to_string(lineNumber) +"]: 'func' keyword missing function identifier name.");
+                throw runtime_error("Syntax Error [Line " + to_string(lineNumber) + "]: 'func' keyword missing function identifier name.");
             }
             callstack.push(second_word);
 
         }
         else if (first_word == "func_end") {
-            if (callstack.isEmpty()){
+            if (callstack.isEmpty()) {
                 in.close();
                 throw runtime_error("syntax error [Line " + to_string(lineNumber) + "]: Unmatched 'func_end' without a preceding 'func' declaration.");
             }
-             callstack.pop();
+            callstack.pop();
         }
     }
     in.close();
-    if (!callstack.isEmpty())throw runtime_error("Syntax Error: Function '" + callstack.peek() +"' was never closed with 'func_end' before end-of-file."); //no function end for a func start
+    if (!callstack.isEmpty())throw runtime_error("Syntax Error: Function '" + callstack.peek() + "' was never closed with 'func_end' before end-of-file."); //no function end for a func start
     return true;
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
 
-// PASS 0x1: RESOLVE() -> resolve.bin
+// PASS 0x1: RESOLVE() -> resolver.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
-    int64_t recordoffset = _ftelli64(f);
+    int64_t recordoffset = ftello(f);
     fwrite(&offsetField, sizeof(int64_t), 1, f);
     int32_t Stringsize = static_cast<int32_t>(text.size());
     fwrite(&Stringsize, sizeof(int32_t), 1, f);
@@ -329,15 +335,15 @@ int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
         fwrite(text.c_str(), sizeof(char), Stringsize, f);
     }
     return recordoffset;
-        // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+    // writes one [offset(8B)][size(4B)][string] record at the current file position
+// returns this record's own starting byte position
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
     int64_t offset_field = -1;
     int32_t Stringsize = 0;
     // read the 8byte offset
-    if (fread(&offset_field, sizeof(int64_t), 1, f)!= 1) {
+    if (fread(&offset_field, sizeof(int64_t), 1, f) != 1) {
         outText = "";
         return -1;
     }
@@ -348,8 +354,12 @@ int64_t readResolveRecord(FILE* f, string& outText)
     }
     // now read string
     if (Stringsize > 0) {
-        outText.resize(Stringsize);
-        fread(&outText[0], sizeof(char), Stringsize, f);
+        char* buffer = new char[Stringsize + 1];
+        size_t bytesRead = fread(buffer, sizeof(char), Stringsize, f);
+        buffer[bytesRead] = '\0';
+
+        outText = string(buffer);
+        delete[] buffer;
     }
     else {
         outText = "";
@@ -367,15 +377,14 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     if (!in.is_open()) {
         throw runtime_error("Linker Error Could not open source file '" + string(sourcePath) + "'.");
     }
-    FILE* f = nullptr;
-    fopen_s(&f, resolveBinPath, "wb+");
+    FILE* f = fopen(resolveBinPath, "wb+");
     if (!f) {
         in.close();
         throw runtime_error("Linker Error Could not create binary file at path '" + string(resolveBinPath) + "'. Check write permissions.");
     }
 
     string line;
-    int64_t totalRecordsWritten = 0;
+    int64_t mainEntryOffset = -1;
 
     //  Record Functions, Patch Targets, and Write Binary Records
     while (readSourceLine(in, line)) {
@@ -400,8 +409,13 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 }
             }
 
+            int64_t recordStart = ftello(f);
+            if (second == "main") {
+                mainEntryOffset = recordStart;
+            }
+
             funcArray[funcCount].funcName = second;
-            funcArray[funcCount].byteOffsetInResolveBin = _ftelli64(f);
+            funcArray[funcCount].byteOffsetInResolveBin = recordStart;
             funcCount++;
         }
         else if (first == "call") {
@@ -423,13 +437,12 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 }
 
                 patches[patchCount].targetFuncName = second;
-                patches[patchCount].byteOffsetOfOffsetField = _ftelli64(f);
+                patches[patchCount].byteOffsetOfOffsetField = ftello(f);
                 patchCount++;
             }
         }
 
         writeResolveRecord(f, targetOffset, line);
-        totalRecordsWritten++;
     }
 
     in.close();
@@ -450,13 +463,18 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
             throw runtime_error("Linker Error Unresolved reference to function '" + patches[i].targetFuncName + "'.");
         }
 
-        // Backpatch the 8-byte targetOffset field in resolve.bin
-        _fseeki64(f, patches[i].byteOffsetOfOffsetField, SEEK_SET);
+        // Backpatch the 8-byte targetOffset field in resolver.bin
+        fseeko(f, patches[i].byteOffsetOfOffsetField, SEEK_SET);
         fwrite(&resolvedOffset, sizeof(int64_t), 1, f);
     }
 
     fclose(f);
-    return totalRecordsWritten;
+
+    if (mainEntryOffset == -1) {
+        throw runtime_error("Linker Error Entry point 'func main' was not found in source.");
+    }
+
+    return mainEntryOffset;
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -524,8 +542,7 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
-    FILE* f = nullptr;
-    fopen_s(&f, resolveBinPath, "rb");
+    FILE* f = fopen(resolveBinPath, "rb");
 
     if (!f) {
         throw runtime_error("Runtime Error could not open binary file '" + string(resolveBinPath) + "'.");
@@ -548,13 +565,13 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
     call_stack.push(mainFrame);
 
-    // Jump to the main function entry point in resolve.bin
-    _fseeki64(f, mainOffset, SEEK_SET);
+    // Jump to the main function entry point in resolver.bin
+    fseeko(f, mainOffset, SEEK_SET);
 
     while (!call_stack.isEmpty()) {
         if (call_stack.depth() >= MAX_STACK_DEPTH) {
             fclose(f);
-            throw runtime_error("Stack Overflow Error exceeded maximum call stack depth (" +to_string(MAX_STACK_DEPTH) + ") in function '" +call_stack.peek().func_name + "'.");
+            throw runtime_error("Stack Overflow Error exceeded maximum call stack depth (" + to_string(MAX_STACK_DEPTH) + ") in function '" + call_stack.peek().func_name + "'.");
         }
 
         Token tokens[MAX_TOKENS];
@@ -565,6 +582,10 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
         if (line.empty()) {
             break; // End of file reached
+        }
+
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+            line.pop_back();
         }
 
         int32_t token_count = tokenizeLine(line, tokens, MAX_TOKENS);
@@ -608,7 +629,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             else {
                 if (currentFrame.localCount >= MAX_VARS_PER_FRAME) {
                     fclose(f);
-                    throw runtime_error("Runtime Error exceeded local variable limit (" +to_string(MAX_VARS_PER_FRAME) + ") in frame '" + currentFrame.func_name + "'.");
+                    throw runtime_error("Runtime Error exceeded local variable limit (" + to_string(MAX_VARS_PER_FRAME) + ") in frame '" + currentFrame.func_name + "'.");
                 }
                 currentFrame.locals[currentFrame.localCount].name = var_name;
                 currentFrame.locals[currentFrame.localCount].value = val;
@@ -639,7 +660,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (destVar == nullptr) {
                 fclose(f);
-                throw runtime_error("Runtime Error destination variable '" + dest_name +"' is not defined in frame '" + currentFrame.func_name + "'.");
+                throw runtime_error("Runtime Error destination variable '" + dest_name + "' is not defined in frame '" + currentFrame.func_name + "'.");
             }
 
             // Resolve source operand
@@ -702,7 +723,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             new_frame.func_name = tokens[1].text;
             new_frame.localCount = 0;
             new_frame.argc = 0;
-            new_frame.returnLine = (int32_t)_ftelli64(f); // Save return offset
+            new_frame.returnLine = (int32_t)ftello(f); // Save return offset
 
             // Bind function call parameters
             for (int i = 2; i < token_count; i++) {
@@ -742,7 +763,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             }
 
             call_stack.push(new_frame);
-            _fseeki64(f, targetOffset, SEEK_SET);
+            fseeko(f, targetOffset, SEEK_SET);
         }
 
         //  FUNC HEADER INSTRUCTION 
@@ -750,7 +771,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             int expArgc = token_count - 2;
             if (currentFrame.argc != expArgc) {
                 fclose(f);
-                throw runtime_error("Runtime Error argument count mismatch for '" + currentFrame.func_name +"'. Expected " + to_string(expArgc) + ", got " + to_string(currentFrame.argc) + ".");
+                throw runtime_error("Runtime Error argument count mismatch for '" + currentFrame.func_name + "'. Expected " + to_string(expArgc) + ", got " + to_string(currentFrame.argc) + ".");
             }
 
             // Bind names to passed argument values
@@ -765,7 +786,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             call_stack.pop();
 
             if (address != -1) {
-                _fseeki64(f, address, SEEK_SET);
+                fseeko(f, address, SEEK_SET);
             }
             else {
                 break; // Exit loop when pops
@@ -790,12 +811,11 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
     // implementation:
     // execute line by line, and according to the keyword perform action
-   
+
 // PASS 0x3: SERIALIZE TIMELINE
 bool writeTdbg(Timeline& timeline, const char* traceBinPath)
 {
-    FILE* f = nullptr;
-    fopen_s(&f, traceBinPath, "wb+");
+    FILE* f = fopen(traceBinPath, "wb+");
     if (!f) throw runtime_error("IO Error unable to create trace binary file at path '" + string(traceBinPath) + ". Check write permissions.");
 
     int32_t totalSteps = timeline.getStepCount();
@@ -822,7 +842,7 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
 
     while (current != nullptr && stepIndex < totalSteps) {
         // Record current disk offset for Step 3's Index Table
-        stepOffsets[stepIndex++] = _ftelli64(f);
+        stepOffsets[stepIndex++] = ftello(f);
 
         Snapshot* s = current->data;
 
@@ -869,14 +889,14 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
         current = current->next;
     }
 
-    int64_t indexTableStart = _ftelli64(f);
+    int64_t indexTableStart = ftello(f);
     if (totalSteps > 0) {
         fwrite(stepOffsets, sizeof(int64_t), totalSteps, f);
     }
 
     //  Backpatch header.indexOffset with the actual index table offset
     header.indexOffset = indexTableStart;
-    _fseeki64(f, 0, SEEK_SET);
+    fseeko(f, 0, SEEK_SET);
     fwrite(&header, sizeof(TTDBHeader), 1, f);
 
     delete[] stepOffsets;
@@ -884,22 +904,75 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
 
     return true;
 }
+
+
+void printTimelineToConsole(Timeline& timeline)
+{
+    cout << "\n";
+    cout << "               EXECUTION TIMELINE HISTORY              \n";
+    cout << "\n";
+
+    TimelineNode* current = timeline.begin();
+    int step = 0;
+
+    while (current != nullptr) {
+        Snapshot* s = current->data;
+        cout << "\n[Step " << step++ << "] Stack Depth: " << s->stackDepth << "\n";
+
+        for (int i = s->stackDepth - 1; i >= 0; i--) {
+            Frame& frame = s->callStack[i];
+            cout << "   Frame: " << frame.func_name;
+
+            if (frame.argc > 0) {
+                cout << " (Args: ";
+                for (int a = 0; a < frame.argc; a++) {
+                    cout << frame.argv[a].name << "=" << frame.argv[a].value;
+                    if (a < frame.argc - 1) cout << ", ";
+                }
+                cout << ")";
+            }
+
+            if (frame.localCount > 0) {
+                cout << " [Locals: ";
+                for (int v = 0; v < frame.localCount; v++) {
+                    cout << frame.locals[v].name << "=" << frame.locals[v].value;
+                    if (v < frame.localCount - 1) cout << ", ";
+                }
+                cout << "]";
+            }
+            cout << "\n";
+        }
+
+        current = current->next;
+    }
+
+    cout << "\n";
+    cout << "Total Steps Recorded: " << timeline.getStepCount() << "\n\n";
+}
+
 // main section
 int32_t main()
 {
+    Timeline timeline; 
 
-    if (!validateProgram("source.bin"))
-    {
-        // send an error response instead of a .tdbg file
+    try {
+        if (!validateProgram("Source.bin")) return 1;
+
+        int64_t mainOffset = resolveProgram("Source.bin", "resolver.bin");
+
+        executeProgram("resolver.bin", mainOffset, timeline);
+        printTimelineToConsole(timeline);
+        writeTdbg(timeline, "session.tdbg");
+    }
+    catch (const exception& e) {
+        cerr << "\n[Error Caught]: " << e.what() << endl;
+
+        if (timeline.getStepCount() > 0) {
+            cout << "\nPrinting execution history recorded prior to failure:";
+            printTimelineToConsole(timeline);
+        }
         return 1;
     }
-
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
-    Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
-
-    writeTdbg(timeline, "session.tdbg");
 
     return 0;
 }

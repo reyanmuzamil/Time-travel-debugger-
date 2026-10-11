@@ -1,0 +1,6 @@
+﻿  server.cpp
+C:\Users\HP\source\repos\DSA project1\DSA project1\server.cpp(148,13): warning C4150: deletion of pointer to incomplete type 'Snapshot'; no destructor called
+      C:\Users\HP\source\repos\DSA project1\DSA project1\server.cpp(120,8):
+      see declaration of 'Snapshot'
+  
+  DSA project1.vcxproj -> C:\Users\HP\source\repos\DSA project1\x64\Debug\DSA project1.exe
