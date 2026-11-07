@@ -129,6 +129,7 @@
     <ClCompile Include="server.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="git.ignore" />
     <None Include="progress.md">
       <SubType>
       </SubType>

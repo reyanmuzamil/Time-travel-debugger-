@@ -31,5 +31,6 @@
       <Filter>Resource Files</Filter>
     </None>
     <None Include="session.tdbg" />
+    <None Include="git.ignore" />
   </ItemGroup>
 </Project>

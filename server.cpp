@@ -231,8 +231,8 @@ bool readSourceLine(ifstream& in, string& out)
     char ch;
     while (in.get(ch)) {
         if (ch == '\n' || ch == 10) {
-            size_t first = line.find_first_not_of(" \t\r");
-            if (first != string::npos) {
+            size_t first = line.find_first_not_of(" \t\r"); // returns the position size)t is unsigned int 
+            if (first != string::npos) { // npos is basically not found used to check if something is in string or not 
                 size_t last = line.find_last_not_of(" \t\r");
                 out = line.substr(first, (last - first + 1));
                 return true;
@@ -325,10 +325,10 @@ bool validateProgram(const char* sourcePath)
 }
 
 // PASS 0x1: RESOLVE() -> resolver.bin
-int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
+int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text) // 8 byte target offset
 {
-    int64_t recordoffset = ftello(f);
-    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    int64_t recordoffset = ftello(f); // current file position in bytes 
+    fwrite(&offsetField, sizeof(int64_t), 1, f); // if call instruction then it swrites 8byte offset otherwise -1
     int32_t Stringsize = static_cast<int32_t>(text.size());
     fwrite(&Stringsize, sizeof(int32_t), 1, f);
     if (Stringsize > 0) {
@@ -338,7 +338,7 @@ int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
     // writes one [offset(8B)][size(4B)][string] record at the current file position
 // returns this record's own starting byte position
 }
-int64_t readResolveRecord(FILE* f, string& outText)
+int64_t readResolveRecord(FILE* f, string& outText) // f is basically current position 
 {
     int64_t offset_field = -1;
     int32_t Stringsize = 0;
@@ -953,7 +953,7 @@ void printTimelineToConsole(Timeline& timeline)
 // main section
 int32_t main()
 {
-    Timeline timeline; 
+    Timeline timeline;
 
     try {
         if (!validateProgram("Source.bin")) return 1;
