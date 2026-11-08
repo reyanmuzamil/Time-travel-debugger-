@@ -16,13 +16,29 @@
 #include <string>
 #include <cstdint>
 #include <cstdio>
+#include<fstream>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
 #include <signal.h>
 #include <vector>
-#include <sys/socket.h>
 #include "helper.h"
+#ifdef _WIN32
+      #include <winsock2.h>
+      #include <ws2tcpip.h>
+      #pragma comment(lib, "ws2_32.lib")
+      typedef int socklen_t;
+      #define close_socket closesocket
+      #define SHUT_WR SD_SEND
+      #ifndef MSG_NOSIGNAL
+      #define MSG_NOSIGNAL 0
+#endif
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#define close_socket close
+#endif
 using namespace std;
 
 // ---- Constants ----
@@ -71,7 +87,7 @@ struct TTDBHeader
 // ---- Structs only the client needs ----
 struct TdbgReader
 {
-    ssize_t file_index;
+    size_t file_index;
     TTDBHeader header;
     vector<int64_t> index;
 };
@@ -91,7 +107,7 @@ bool recvAll(int sock, char* buf, size_t n)
 {
     int32_t total_recieved = 0;
     while (total_recieved < n) {
-        size_t bytes_read = recv(sock, buf + total_recieved, n - total_recieved, 0);
+        size_t bytes_read = recv(sock, buf + total_recieved, static_cast<int>(n - total_recieved), 0);
         // buf+total pointer to next empty spot... n-total is how many bytes we are still waiting for
         if (bytes_read > 0) total_recieved += bytes_read;
         else if (bytes_read == 0) {
@@ -103,8 +119,8 @@ bool recvAll(int sock, char* buf, size_t n)
             return false;
         }
         if (total_recieved == n)return true;// we got all bytes
-
     }
+    return true;
     // recv() can return fewer bytes than asked for, so keep calling it until exactly n bytes are read.
     // Return false if the connection closes or fails before n bytes arrive.
 }
@@ -117,20 +133,25 @@ bool sendAll(int sock, const char* buf, size_t n)
         if (bytes > 0)totalsent += bytes;
         if (totalsent == n)return true;
     }
-    return false;
+    return true;
     // send() can send fewer bytes than asked for, so keep calling it until all n bytes are sent.
     // Use the flag MSG_NOSIGNAL. Return false if the connection fails.
 }
 // connect client to loadbalanv=cer using its ip and port number
 int connectToHost(const char* host, int port)
 {
-    int sock = socket(AF_INET, SOCK_STREAM, 0); // AF_inet tells the OS to use ipv4 address
-    if (sock == -1)return -1;
+    if (!initSockets())return -1;
+
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)); // AF_inet tells the OS to use ipv4 address
+    if (sock <0)return -1;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port); // Convert port number to network byte order
-    inet_pton(AF_INET, host, &addr.sin_addr); // convert ip string into binary
+    if (inet_pton(AF_INET, host, &addr.sin_addr)<=0) {
+        close_socket(sock);
+        return -1;
+    }// convert ip string into binary
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(sock); // Clean up socket descriptor if connection fails
         return -1;
@@ -139,15 +160,170 @@ int connectToHost(const char* host, int port)
     // Create a TCP socket and connect it to host:port.
     // Return the socket, or -1 if the connection fails.
 }
+// reads chunk from compute checksum and send the data accross sock
 bool uploadSource(int sock, const char* sourcePath)
 {
+    ifstream source(sourcePath, ios::binary);
+    if (!source.is_open()) return false;
 
+    char buffer[IO_BUFFER_SIZE];
+    uint32_t checksum = 0; // Initialize rolling CRC-32 checksum
+
+    while (source.read(buffer, IO_BUFFER_SIZE) || source.gcount() > 0)
+    {
+        streamsize bytesRead = source.gcount();
+        if (bytesRead <= 0) break;
+
+        // 1. Calculate rolling checksum on chunk
+        checksum = update_crc32(checksum, buffer, static_cast<size_t>(bytesRead));
+
+        // 2. Send chunk over socket
+        if (!sendAll(sock, buffer, static_cast<size_t>(bytesRead)))
+        {
+            source.close();
+            return false;
+        }
+    }
+
+    source.close();
+
+    // 3. Append 4-byte CRC32 Checksum Trailer at end of file stream
+    uint32_t netChecksum = htonl(checksum);
+    if (!sendAll(sock, reinterpret_cast<const char*>(&netChecksum), sizeof(netChecksum)))
+    {
+        return false;
+    }
+
+    // 4. Half-close socket to signal upload completion to Load Balancer
+    shutdown(sock, SHUT_WR);
+
+    return true;
     // have to do checksum and then send
     // When the file is finished, call shutdown(sock, SHUT_WR). This is how the server knows the string is complete.
     // Return false if the file cannot be opened or any send fails.
 }
 bool receiveResponse(int sock, const char* outTdbgPath, string& outError)
 {
+    char statusByte = 0;
+    if (!recvAll(sock, &statusByte, 1))
+    {
+        outError = "Failed to receive response status from server.";
+        return false;
+    }
+
+    uint8_t status = static_cast<uint8_t>(statusByte);
+
+    // Initialize rolling CRC32 calculation starting with the status byte
+    uint32_t computedCrc = 0;
+    computedCrc = update_crc32(computedCrc, &statusByte, 1);
+
+    // Open output file if Status == 0 (Success)
+    ofstream outFile;
+    if (status == 0)
+    {
+        outFile.open(outTdbgPath, ios::binary);
+        if (!outFile.is_open())
+        {
+            outError = "Cannot open output file to save .tdbg response.";
+            return false;
+        }
+    }
+
+    // 2. Sliding Window Ring Buffer to hold back the last 4 bytes (CRC-32 trailer)
+    char window[4];
+    size_t windowCount = 0;
+    string errorPayload = "";
+
+    char inputBuf[IO_BUFFER_SIZE];
+    ssize_t bytesRead = 0;
+
+    // Loop until the remote end closes the socket connection (EOF)
+    while ((bytesRead = recv(sock, inputBuf, IO_BUFFER_SIZE, 0)) > 0)
+    {
+        for (ssize_t i = 0; i < bytesRead; ++i)
+        {
+            char currentByte = inputBuf[i];
+
+            if (windowCount < 4)
+            {
+                // Fill initial window buffer
+                window[windowCount++] = currentByte;
+            }
+            else
+            {
+                // Shift out the oldest byte from the window
+                char byteToWrite = window[0];
+                window[0] = window[1];
+                window[1] = window[2];
+                window[2] = window[3];
+                window[3] = currentByte;
+
+                // Process the byte pushed out of the 4-byte trailer window
+                computedCrc = update_crc32(computedCrc, &byteToWrite, 1);
+
+                if (status == 0)
+                {
+                    outFile.put(byteToWrite);
+                }
+                else
+                {
+                    errorPayload += byteToWrite;
+                }
+            }
+        }
+    }
+
+    if (bytesRead < 0)
+    {
+        if (outFile.is_open())
+        {
+            outFile.close();
+            remove(outTdbgPath);
+        }
+        outError = "Socket error occurred while receiving payload stream.";
+        return false;
+    }
+
+    // Must have received at least the 4-byte CRC-32 trailer
+    if (windowCount < 4)
+    {
+        if (outFile.is_open())
+        {
+            outFile.close();
+            remove(outTdbgPath);
+        }
+        outError = "Truncated response stream: missing checksum trailer.";
+        return false;
+    }
+
+    // 3. Extract received CRC-32 checksum trailer from window
+    uint32_t receivedCrc = 0;
+    memcpy(&receivedCrc, window, 4);
+    receivedCrc = ntohl(receivedCrc);
+
+    // 4. Verify Checksum Integrity
+    if (computedCrc != receivedCrc)
+    {
+        if (outFile.is_open())
+        {
+            outFile.close();
+            remove(outTdbgPath); // Delete corrupted payload from disk
+        }
+        outError = "checksum mismatch, response corrupted";
+        return false;
+    }
+
+    // Checksum verified successfully
+    if (status == 0)
+    {
+        outFile.close();
+        return true;
+    }
+    else
+    {
+        outError = errorPayload;
+        return false;
+    }
     // Reply on the wire: [status][payload][CRC-32]. The CRC covers the status byte too.
     // Feed every received byte (status included) to a TrailerChecker.
     // Status 1: collect the payload into outError. Status 0: write the payload to the file.
@@ -164,13 +340,145 @@ bool receiveResponse(int sock, const char* outTdbgPath, string& outError)
 
 bool openTdbg(const char* path, TdbgReader& r)
 {
+    FILE* f = fopen(path, "rb");
+    if (!f)return false;
+    // read 24 byte TTDB header 
+    if (fread(&r.header, sizeof(TTDBHEADER), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+    // verifying header 
+    if (r.header.magic[0] != 'T' || r.header.magic[1] != 'T' || r.header.magic[2] != 'D' || r.header.magic[3] != 'B') {
+        fclose(f);
+        return false;
+    }
+    // seeking into dense index trailer
+    if (fseek(f, r.header.indexOffset, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+    // allocate size and store it in r,index
+    r.index.resize(r.header.stepCount);
+    if (r.header.stepCount > 0)
+    {
+        size_t readCount = fread(r.index.data(), sizeof(int64_t), r.header.stepCount, f);
+        if (readCount != static_cast<size_t>(r.header.stepCount))
+        {
+            r.index.clear();
+            fclose(f);
+            return false;
+        }
+    }
+    r.file_index = reinterpret_cast<ssize_t>(f);
+    return true;
 }
 void closeTdbg(TdbgReader& r)
 {
+    // closing file 
+    if (r.file_index != 0 && r.file_index != -1)
+    {
+        FILE* f = reinterpret_cast<FILE*>(r.file_index);
+        fclose(f);
+        r.file_index = -1;
+    }
+    r.index.clear();
+    r.header.stepCount = 0;
+    r.header.indexOffset = 0;
+    r.header.version = 0;
+    r.header.magic[0] = '\0'
     // Free r.index and close the file.
 }
+// uses the step index TO GO DIRECTLY TO Exact byte location 
 Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 {
+    if (step<0 and step>=r.header.stepCount)return nullptr; // out of bounds check
+    // jump to target offset
+    if (r.file_index == 0 || r.file_index == -1)
+    {
+        return nullptr;
+    }
+    // seeking to the exact byte position 
+    FILE* f = reinterpret_cast<FILE*>(r.file_index);
+    int64_t targetByteOffset = r.index[step];
+    if (fseeko(f, targetByteOffset, SEEK_SET) != 0)
+    {
+        return nullptr;
+    }
+    Snapshot* s = new Snapshot();
+    if (fread(&(s->stackDepth), sizeof(int32_t), 1, f) != 1)
+    {
+        delete s;
+        return nullptr;
+    }
+
+    // each frame in stack
+    for (int32_t i = 0; i < s->stackDepth; i++)
+    {
+        Frame& frame = s->callStack[i];
+
+        // reading function name 
+        int32_t nameLen = 0;
+        if (fread(&nameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        if (nameLen > 0)
+        {
+            vector<char> nameBuf(nameLen + 1, '\0');
+            fread(nameBuf.data(), sizeof(char), nameLen, f);
+            frame.func_name = string(nameBuf.data());
+        }
+        else
+        {
+            frame.func_name = "";
+        }
+
+        //  read return Line
+        if (fread(&(frame.returnLine), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+
+        //  read positional arguments 
+        if (fread(&(frame.argc), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        for (int32_t a = 0; a < frame.argc; a++)
+        {
+            int32_t argNameLen = 0;
+            if (fread(&argNameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+
+            if (argNameLen > 0)
+            {
+                vector<char> argBuf(argNameLen + 1, '\0');
+                fread(argBuf.data(), sizeof(char), argNameLen, f);
+                frame.argv[a].name = string(argBuf.data());
+            }
+            else
+            {
+                frame.argv[a].name = "";
+            }
+
+            if (fread(&(frame.argv[a].value), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        }
+
+        // Read Local Variables
+        if (fread(&(frame.localCount), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        for (int32_t v = 0; v < frame.localCount; v++)
+        {
+            int32_t varNameLen = 0;
+            if (fread(&varNameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+
+            if (varNameLen > 0)
+            {
+                vector<char> varBuf(varNameLen + 1, '\0');
+                fread(varBuf.data(), sizeof(char), varNameLen, f);
+                frame.locals[v].name = string(varBuf.data());
+            }
+            else
+            {
+                frame.locals[v].name = "";
+            }
+
+            if (fread(&(frame.locals[v].value), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        }
+    }
+
+    return s;
+
+
 }
 
 // =============================================================================================

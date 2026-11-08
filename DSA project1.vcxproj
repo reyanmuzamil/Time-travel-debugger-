@@ -126,6 +126,7 @@
     <Text Include="source.bin.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="client.cpp" />
     <ClCompile Include="server.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -137,6 +138,9 @@
     <None Include="resolver.bin" />
     <None Include="session.tdbg" />
     <None Include="Source.bin" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="helper.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

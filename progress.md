@@ -42,4 +42,5 @@
 --* In this commit we have made quite alot of changes like i have changed some parts of my error where i was getting error today after testing and we have also created a new main which catches the error and i have created a function which prints output onto consolve for my understanding 
 # Commit 12
 --* In this commit we are moving to client side and now have created 3 funcions of client .
-
+#commit 13
+--* IN this commit we have added open close tdbg file  and reading every stack frames  

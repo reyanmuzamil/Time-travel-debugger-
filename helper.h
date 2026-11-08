@@ -13,3 +13,16 @@ struct PendingPatch
     int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
     string targetFuncName;
 };
+inline uint32_t update_crc32(uint32_t crc, const char* buf, size_t len)
+{
+    crc = ~crc;
+    for (size_t i = 0; i < len; ++i)
+    {
+        crc ^= static_cast<uint8_t>(buf[i]);
+        for (int k = 0; k < 8; ++k)
+        {
+            crc = (crc >> 1) ^ (0xEDB88320U & (-(crc & 1)));
+        }
+    }
+    return ~crc;
+}
