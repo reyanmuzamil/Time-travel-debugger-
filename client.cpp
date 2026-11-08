@@ -88,7 +88,7 @@ struct TTDBHeader
 struct TdbgReader
 {
     size_t file_index; // file stream pointer keeps the file open so client doesnot always have to open it again and again 
-    TTDBHeader header; // 
+    TTDBHeader header; 
     vector<int64_t> index;
 };
 struct DebugSession
@@ -140,19 +140,20 @@ bool sendAll(int sock, const char* buf, size_t n)
 // connect client to loadbalanv=cer using its ip and port number
 int connectToHost(const char* host, int port)
 {
-    if (!initSockets())return -1;
-
-    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)); // AF_inet tells the OS to use ipv4 address
-    if (sock <0)return -1;
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
+    if (!initSockets())return -1; // to check for windows network initialization
+    // int sock is an integer value which the operator system assigns to yout TCP socket 
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)); // AF_inet tells the OS to use ipv4 address, SOCKSTZREAM specifies reliable TCP connection 
+    // 0 means let OS chose default protocol for TCP
+    if (sock <0)return -1;// socket creation fails 
+    struct sockaddr_in addr; // struct for storing ipv4 address and port number 
+    memset(&addr, 0, sizeof(addr)); // wipes memort blovk of addr with zeros to ensure  no garbage memory interfare with address configuration
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port); // Convert port number to network byte order
-    if (inet_pton(AF_INET, host, &addr.sin_addr)<=0) {
+    if (inet_pton(AF_INET, host, &addr.sin_addr)<=0) { // convert and check if ip is valid or not malformed
         close_socket(sock);
         return -1;
     }// convert ip string into binary
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {// sends TCP SYN packet to initiate 3 way tcp connection 
         close(sock); // Clean up socket descriptor if connection fails
         return -1;
     }
@@ -626,9 +627,58 @@ bool cmdJmpPrv(DebugSession& s, int32_t n)
 
 void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot& s)
 {
+    cout << "---Step " << step << " / " << totalSteps << "---" << endl;
+
+    if (s.stackDepth <= 0)
+    {
+        cout << "  (Empty stack)" << endl;
+        return;
+    }
+
+    // Display top of stack (recent call) down to bottom (main)
+    for (int32_t i = s.stackDepth - 1; i >= 0; --i)
+    {
+        const Frame& frame = s.callStack[i];
+
+        cout << "[" << i << "] Frame: " << frame.func_name << "(";
+
+        // Printing arguments
+        for (int32_t a = 0; a < frame.argc; ++a)
+        {
+            cout << frame.argv[a].name << "=" << frame.argv[a].value;
+            if (a + 1 < frame.argc) cout << ", ";
+        }
+        cout << ")";
+
+        if (frame.returnLine >= 0)
+        {
+            cout << " [ret: line " << frame.returnLine << "]";
+        }
+        cout << endl;
+
+        // Printing local variables
+        if (frame.localCount > 0)
+        {
+            cout << "    Locals: ";
+            for (int32_t v = 0; v < frame.localCount; ++v)
+            {
+                cout << frame.locals[v].name << "=" << frame.locals[v].value;
+                if (v + 1 < frame.localCount) cout << ", ";
+            }
+            cout << endl;
+        }
+    }
 }
 void printHelp()
 {
+    cout << "Available commands:" << endl;
+    cout << "  start <source.bin>   - Upload source code to load balancer and initialize trace session" << endl;
+    cout << "  next                 - Move forward 1 step" << endl;
+    cout << "  prv                  - Move backward 1 step" << endl;
+    cout << "  jmp next <n>         - Jump forward n steps" << endl;
+    cout << "  jmp prv <n>          - Jump backward n steps" << endl;
+    cout << "  help                 - Display command help" << endl;
+    cout << "  quit / exit          - Exit the time-travel debugger" << endl;
     // Print the commands
 }
 

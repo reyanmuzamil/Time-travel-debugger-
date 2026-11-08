@@ -45,7 +45,9 @@
 #commit 13
 --* IN this commit we have added open close tdbg file  and reading every stack frames  
 # Commit 14
---* So here we added initsession,close session , showcurrent which displays the current snapshot the user is looking at along with move by (moving foward and backward in time
-)
-#Commit 15
+--* So here we added initsession,close session , showcurrent which displays the current snapshot the user is looking at along with move by (moving foward and backward in time)
+
+# Commit 15
 --* We have added functions in which user can jump to next state and commandstart fucntion which creates a new debugging session while protecting your current active one 
+#commit 16 
+--* Now here  we have added some functions for our console like printing the entire timeline uptil now and what commands we have
