@@ -44,3 +44,5 @@
 --* In this commit we are moving to client side and now have created 3 funcions of client .
 #commit 13
 --* IN this commit we have added open close tdbg file  and reading every stack frames  
+# Commit 14
+--* So here we added initsession,close session , showcurrent which displays the current snapshot the user is looking at along with move by (moving foward and backward in time) 

@@ -488,10 +488,23 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 
 void initSession(DebugSession& s)
 {
-
+    s.active_flag = 0;
+    s.currentStep = 0;
+    s.reader.file_index = -1;
+    s.reader.index.clear();
+    s.reader.header.indexOffset = 0;
+    s.reader.header.stepCount = 0;
+    s.reader.header.magic[0] = '\0';
+    s.reader.header.version = 0;
 }
 void closeSession(DebugSession& s)
 {
+    if (s.active_flag) {
+        closeTdbg(s.reader);
+        s.active_flag = 0;
+    }
+    s.currentStep = 0;
+
     // If active, call closeTdbg(s.reader). Then set active = false.
     // Called when the user types quit and when the input ends.
 }
@@ -504,11 +517,31 @@ void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot& s); // defi
 
 bool showCurrent(DebugSession& s)
 {
+    Snapshot *S1 = readSnapshotAt(s.reader, s.currentStep);
+    if (!S1) {
+        cout << "\n The file is damaged";
+        return false;
+    }
+    else {
+        printSnapshot(s.currentStep + 1, s.reader.header.stepCount, *S1);
+        delete S1;
+        return true;
+    }
     // Read the snapshot at s.currentStep, call printSnapshot, delete the snapshot.
     // If readSnapshotAt returns nullptr, print "damaged .tdbg file" and return false.
 }
 bool moveBy(DebugSession& s, int32_t delta)
 {
+    if (!s.active_flag) {
+        cout << "\n No active debug session . Use 'start <source.bin>' first ";
+        return false;
+    }
+    int64_t targetStep = s.currentStep + delta;
+    if (targetStep < 0)s.currentStep = 0;
+    else if (targetStep >= s.reader.header.stepCount) s.currentStep = s.reader.header.stepCount - 1;
+    else s.currentStep = targetStep;
+    showCurrent(s);
+    return true;
 }
 bool cmdStart(DebugSession& s, const string& sourcePath)
 {
