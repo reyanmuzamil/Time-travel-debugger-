@@ -87,8 +87,8 @@ struct TTDBHeader
 // ---- Structs only the client needs ----
 struct TdbgReader
 {
-    size_t file_index;
-    TTDBHeader header;
+    size_t file_index; // file stream pointer keeps the file open so client doesnot always have to open it again and again 
+    TTDBHeader header; // 
     vector<int64_t> index;
 };
 struct DebugSession
@@ -485,7 +485,7 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 // PART C: THE SESSION IN MEMORY
 // There is one DebugSession variable, created in main() and passed to every command by reference.
 // =============================================================================================
-
+//sets up a fresh, clean, empty session when the client program starts
 void initSession(DebugSession& s)
 {
     s.active_flag = 0;
@@ -543,8 +543,45 @@ bool moveBy(DebugSession& s, int32_t delta)
     showCurrent(s);
     return true;
 }
+//establishes a new debugging session from a source code binary file while protecting your active session if anything fails.
 bool cmdStart(DebugSession& s, const string& sourcePath)
 {
+    string errorMsg;
+
+    // Request .tdbg file from Load Balancer into TDBG_FILE
+    if (!requestDebugFile(LB_HOST.c_str(), LB_PORT, sourcePath.c_str(), TDBG_FILE, errorMsg))
+    {
+        // Network / Checksum failure: print error and return false. Keep old session untouched.
+        cout << errorMsg << endl;
+        return false;
+    }
+
+    //Open downloaded file into a TEMPORARY local TdbgReader first
+    TdbgReader tempReader;
+    tempReader.file_index = -1;
+    tempReader.header.stepCount = 0;
+    tempReader.header.indexOffset = 0;
+
+    if (!openTdbg(TDBG_FILE, tempReader))
+    {
+        // Headers or index corrupted: print exact error, return false, preserve old session.
+        cout << "server sent a damaged .tdbg file" << endl;
+        return false;
+    }
+
+    //  Verification passed: Close old session resources safely if currently active
+    if (s.active_flag)
+    {
+        closeSession(s);
+    }
+
+    //Swap temporary reader into s.reader
+    s.reader = tempReader;
+    s.active_flag = 1;
+    s.currentStep = 0;
+
+    // Render Step 1
+    return showCurrent(s);
     // 1. requestDebugFile with host and port, saving to TDBG_FILE.
     // 2. If it fails, print the error text and return false. Keep the old session as it was.
     // 3. Open the new file with openTdbg into a NEW local TdbgReader.
@@ -553,10 +590,35 @@ bool cmdStart(DebugSession& s, const string& sourcePath)
     //    set s.currentStep = 0 and s.active = true.
     // 5. Show step 1 with showCurrent(s).
 }
-bool cmdNext(DebugSession& s) {}
-bool cmdPrv(DebugSession& s) {}
-bool cmdJmpNext(DebugSession& s, int32_t n) {}
-bool cmdJmpPrv(DebugSession& s, int32_t n) {}
+bool cmdNext(DebugSession& s)
+{
+    return moveBy(s, 1);
+}
+
+bool cmdPrv(DebugSession& s)
+{
+    return moveBy(s, -1);
+}
+
+bool cmdJmpNext(DebugSession& s, int32_t n)
+{
+    if (n <= 0 || n > MAX_JUMP)
+    {
+        cout << "invalid jump count" << endl;
+        return false;
+    }
+    return moveBy(s, n);
+}
+
+bool cmdJmpPrv(DebugSession& s, int32_t n)
+{
+    if (n <= 0 || n > MAX_JUMP)
+    {
+        cout << "invalid jump count" << endl;
+        return false;
+    }
+    return moveBy(s, -n);
+}
 
 // =============================================================================================
 // PART E: PRINTING
