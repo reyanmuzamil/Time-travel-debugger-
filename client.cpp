@@ -688,6 +688,117 @@ void printHelp()
 
 bool runCommand(DebugSession& s, const string& line, bool& quitRequested)
 {
+    // 1. Split line into words
+    vector<string> words;
+    size_t start = 0;
+    while (start < line.length())
+    {
+        size_t first = line.find_first_not_of(" \t\r\n", start);
+        if (first == string::npos) break;
+        size_t last = line.find_first_of(" \t\r\n", first);
+        if (last == string::npos)
+        {
+            words.push_back(line.substr(first));
+            break;
+        }
+        words.push_back(line.substr(first, last - first));
+        start = last;
+    }
+
+    // Ignore empty lines
+    if (words.empty()) return true;
+
+    // 2. Drop "ttdb" prefix if user types "ttdb start ..."
+    size_t idx = 0;
+    if (words[0] == "ttdb")
+    {
+        idx = 1;
+        if (words.size() <= 1) return true;
+    }
+
+    string cmd = words[idx];
+
+    // 3. Command Matching & Dispatch
+    if (cmd == "start")
+    {
+        if (idx + 1 >= words.size())
+        {
+            cout << "usage: start <source.bin>" << endl;
+            return false;
+        }
+        return cmdStart(s, words[idx + 1]);
+    }
+    else if (cmd == "next")
+    {
+        if (words.size() - idx != 1)
+        {
+            cout << "unknown command" << endl;
+            printHelp();
+            return false;
+        }
+        return cmdNext(s);
+    }
+    else if (cmd == "prv")
+    {
+        if (words.size() - idx != 1)
+        {
+            cout << "unknown command" << endl;
+            printHelp();
+            return false;
+        }
+        return cmdPrv(s);
+    }
+    else if (cmd == "jmp")
+    {
+        if (words.size() - idx != 3)
+        {
+            cout << "usage: jmp next <n> OR jmp prv <n>" << endl;
+            return false;
+        }
+
+        string direction = words[idx + 1];
+        int32_t n = 0;
+        try
+        {
+            n = stoi(words[idx + 2]);
+        }
+        catch (...)
+        {
+            cout << "invalid jump count" << endl;
+            return false;
+        }
+
+        if (direction == "next")
+        {
+            return cmdJmpNext(s, n);
+        }
+        else if (direction == "prv")
+        {
+            return cmdJmpPrv(s, n);
+        }
+        else
+        {
+            cout << "usage: jmp next <n> OR jmp prv <n>" << endl;
+            return false;
+        }
+    }
+    else if (cmd == "help")
+    {
+        printHelp();
+        return true;
+    }
+    else if (cmd == "quit" || cmd == "exit")
+    {
+        quitRequested = true;
+        return true;
+    }
+    else
+    {
+        cout << "unknown command" << endl;
+        printHelp();
+        return false;
+    }
+}
     // 1. Split the line into words.
     // 2. If the first word is "ttdb", drop it.
     // 3. Match the first word:
@@ -699,9 +810,44 @@ bool runCommand(DebugSession& s, const string& line, bool& quitRequested)
     //      help       -> printHelp
     //      quit, exit -> set quitRequested = true
     // 4. For anything else, or a wrong number of words, print "unknown command" and the help text, and return false.
-}
 int main(int argc, char* argv[])
 {
+    if (argc >= 2)
+    {
+        LB_HOST = argv[1];
+    }
+    if (argc >= 3)
+    {
+        LB_PORT = atoi(argv[2]);
+    }
+
+    DebugSession session;
+    initSession(session);
+
+    cout << "Welcome to " << PROGRAM_NAME << " (Time-Travel Debugger)" << endl;
+    printHelp();
+    cout << endl;
+
+    bool quitRequested = false;
+    string inputLine;
+
+    // CLI Loop
+    while (!quitRequested)
+    {
+        cout << PROMPT;
+        if (!getline(cin, inputLine))
+        {
+            // End of input stream (EOF / Ctrl+D)
+            break;
+        }
+        runCommand(session, inputLine, quitRequested);
+    }
+
+    // Clean up session resources before exiting
+    closeSession(session);
+    cleanupSockets();
+
+    return 0;
     // you get string LB_HOST and int LB_PORT = 0 in arguments of this main function. 
 
     // DebugSession session; initSession(session);
