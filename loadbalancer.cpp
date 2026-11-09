@@ -1,53 +1,52 @@
-// ======================= TIME-TRAVEL DEBUGGER - LOAD BALANCER TEMPLATE =======================
-
-// What load balancer does:
-//   1. Many clients can connect at the same time. Each one sends one string (the source code). 
-//   2. Clients wait in a queue (first come, first served).
-//   3. For each client, in order: make sure the server is running (start it with system() if not),
-//      pass the string to the server, pass the server's reply back to the client.
-//
-// It does not read or understand the messages. It only moves bytes.
-// The only messages it writes itself are errors ("server busy", "server failed to start").
-//
-// Two threads:
-//   acceptor thread (acceptLoop) -> takes new clients and puts them in the queue. It never waits for the server.
-//   main thread (dispatcherLoop) -> takes ONE client out of the queue and serves it completely, then the next.
-//
-// How the server is started:
-//   system("./server 5001 &");
-//   The "&" is required. Without it, system() waits until the server exits and the load balancer freezes.
-//
-//
-// What the server program must do (the load balancer depends on this):
-//   - it takes its port as the first argument, for example: ./server 5001
-//   - it reads the string until the connection's write side is closed (recv returns 0)
-//   - it sends its reply as [status: 1 byte][payload], then closes the connection 
-
-
 #include <iostream>
 #include <string>
 #include <cstdlib>
 #include <thread>
 #include <mutex>
-#include <unistd.h>
+#include <vector>
+#include <stdexcept>
+#include <cstring>
 #include <signal.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#pragma comment(lib, "ws2_32.lib")
+#define close_socket(s) closesocket(s)
+#define SLEEP_MS(ms) Sleep(ms)
+#else
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#define close_socket(s) close(s)
+#define SLEEP_MS(ms) usleep((ms) * 1000)
+#endif
+
 #include "helper.h"
 using namespace std;
 
 
 // ---- Constants ----
+#ifdef _WIN32
+const char* SERVER_PATH = "server.exe";    // executable name on Windows
+#else
 const char* SERVER_PATH = "./server";      // the program we start when the server is down
+#endif
+
 const int IO_BUFFER_SIZE = 64 * 1024;      // fixed buffer for moving bytes
 const int LISTEN_BACKLOG = 16;             // connections the OS holds until accept() takes them
 const int MAX_PENDING_CLIENTS = 8;         // clients allowed to wait in our queue. More than this get "server busy".
 const int STARTUP_MAX_ATTEMPTS = 50;       // after starting the server, how many times we try to connect
 const int STARTUP_POLL_INTERVAL_MS = 100;  // wait between those tries (50 x 100 ms = 5 seconds in total)
 int lbPort = 5000;
-string serverHost = "127.0.0.0";
+string serverHost = "127.0.0.1";           // local loopback address
 int serverPort = 5001;
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 
 // ---- Queue: here it holds client sockets (int). ----
@@ -59,8 +58,10 @@ class Queue
     {
         T data;
         Node* next;
+        Node(const T& d) : data(d), next(nullptr) {}
     };
-    Node* front, * rear;
+    Node* front;
+    Node* rear;
     int count;
 
 
@@ -76,34 +77,41 @@ public:
         while (!isEmpty()) {
             dequeue();
         }
-
     }
     void enqueue(const T& val)
     {
         Node* temp = new Node(val);
-        if (front == rear and front == nullptr) {
+        if (isEmpty()) {
             front = rear = temp;
-            count++;
-            return;
         }
-        rear = rear->next;
-        rear = temp;
+        else {
+            rear->next = temp;
+            rear = temp;
+        }
         count++;
-
     }
     T dequeue()
     {
         if (isEmpty()) {
             throw underflow_error("Queue is empty");
         }
+        Node* temp = front;
+        T val = temp->data;
+
         front = front->next;
+        delete temp;
         count--;
+
+        if (front == nullptr) {
+            rear = nullptr;
+        }
+        return val;
     }
-    bool isEmpty()
+    bool isEmpty() const
     {
         return count == 0;
     }
-    int size()
+    int size() const
     {
         return count;
     }
@@ -126,12 +134,11 @@ sig_atomic_t flag = 1;
 // ---- Basic socket helpers ----
 bool sendAll(int sock, const char* buf, size_t n)
 {
-    int32_t totalsent = 0;
+    size_t totalsent = 0;
     while (totalsent < n) {
-        size_t bytes = send(sock, buf + totalsent, n - totalsent, MSG_NOSIGNAL);
-        if (bytes <= 0)return false;// connection closed or error 
-        if (bytes > 0)totalsent += bytes;
-        if (totalsent == n)return true;
+        ssize_t bytes = send(sock, buf + totalsent, n - totalsent, MSG_NOSIGNAL);
+        if (bytes <= 0) return false; // connection closed or error 
+        totalsent += static_cast<size_t>(bytes);
     }
     return true;
     // Reply format: [status: 1 byte][sending_material][checksum: 4 bytes].
@@ -141,7 +148,7 @@ bool sendError(int sock, const string& message) // if server queue is full or se
 {
     char statusByte = 1;
 
-    // Compute checksum covering status byte annd msg
+    // Compute checksum covering status byte and msg
     uint32_t crc = 0;
     crc = update_crc32(crc, &statusByte, 1);
     crc = update_crc32(crc, message.data(), message.size());
@@ -162,6 +169,47 @@ bool sendError(int sock, const string& message) // if server queue is full or se
 }
 int createListenSocket(int port)
 {
+    // Create IPv4 TCP socket
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    if (sock < 0)
+    {
+        cerr << "Failed to create listening socket" << endl;
+        exit(1);
+    }
+
+    // Set SO_REUSEADDR so port frees up instantly on restart
+    int opt = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt)) < 0)
+    {
+        cerr << "Failed to set SO_REUSEADDR" << endl;
+        close_socket(sock);
+        exit(1);
+    }
+
+    // Configure socket address structure
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    // Bind socket to port
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        cerr << "Failed to bind socket to port " << port << endl;
+        close_socket(sock);
+        exit(1);
+    }
+
+    // Start listening for incoming connections
+    if (listen(sock, LISTEN_BACKLOG) < 0)
+    {
+        cerr << "Failed to listen on socket" << endl;
+        close_socket(sock);
+        exit(1);
+    }
+
+    return sock;
     // Create a TCP socket with SOCK_CLOEXEC(flag).
     // set SO_REUSEADDR so we can restart the load balancer right away.
     // bind() to the port on any address, then listen(LISTEN_BACKLOG).
@@ -169,6 +217,24 @@ int createListenSocket(int port)
 }
 int connectToServer(const char* host, int port)
 {
+    // creating a socket
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    if (sock < 0) return -1;
+
+    struct sockaddr_in addr; // struct for storing ipv4 address and port number 
+    memset(&addr, 0, sizeof(addr)); // wipes memory block of addr with zeros to ensure no garbage memory interferes with address configuration
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port); // Convert port number to network byte order
+
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) { // convert and check if ip is valid or not malformed
+        close_socket(sock);
+        return -1;
+    }
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { // sends TCP SYN packet to initiate 3 way tcp connection 
+        close_socket(sock); // Clean up socket descriptor if connection fails
+        return -1;
+    }
+    return sock;
     // Create a TCP socket (SOCK_CLOEXEC) and connect it to host:port.
     // Return the socket, or -1 if the connection fails 
 }
@@ -177,22 +243,44 @@ int connectToServer(const char* host, int port)
 // PART 1: WAKING UP THE SERVER IF IT IS DOWN
 // =============================================================================================
 
-
+// launches the backend server using a system command 
 bool startServer(int port)
 {
+    string command;
+#ifdef _WIN32
+    command = "start /B " + string(SERVER_PATH) + " " + to_string(port);
+#else
+     command = string(SERVER_PATH) + " " + to_string(port) + " &";
+#endif
     // Build the command text: SERVER_PATH + " " + port as text + "&"
     //   Example: "./server 5001 &"
     // Call system() with it.
+    if (system(command.c_str()) == 0) return true;
+    return false;
     // Return true if system() returned 0, otherwise false.
+    // & is very important without it the system blocks until the server exits, freezing the entire load balancer. & tells the OS to detach the process into the background 
 }
 int connectToServerWithWakeup()
 {
+    int s = connectToServer(serverHost.c_str(), serverPort);
+    if (s != -1) return s; // meaning server is already alive 
+    if (!startServer(serverPort)) return -1; // server down attempt auto spawn 
+
+    // trying to connect server up to 50 times 
+    for (int i = 0; i < STARTUP_MAX_ATTEMPTS; ++i)
+    {
+        SLEEP_MS(STARTUP_POLL_INTERVAL_MS); // 100 ms sleep
+        int sock = connectToServer(serverHost.c_str(), serverPort);
+        if (sock != -1) return sock;
+    }
+
+    // Server failed to open port within 5 seconds
+    return -1;
     // 1. Try connectToServer(). If it works, return that socket. The server is alive.
     // 2. Otherwise call startServer(). If it fails, return -1.
     // 3. Try connectToServer() up to STARTUP_MAX_ATTEMPTS times 
     // 4. Return the first working socket, or -1 if the server never came up.
 }
-
 
 // =============================================================================================
 // PART 2: PASSING THE STRING AND THE REPLY (one client, called by the main thread only)
