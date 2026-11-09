@@ -290,6 +290,29 @@ int connectToServerWithWakeup()
 void relayOneClient(ClientInfo& c)
 {
     // 1. serverSock = connectToServerWithWakeup().
+    int connect = connectToServerWithWakeup();
+    if (connect == -1) {
+        sendError(c.sock, "Backend server failed to connect");
+        // close socket
+        return;
+    }
+    vector<char> buffer(IO_BUFFER_SIZE);
+    //  Client to server: repeat recv() from clientSock into a buffer of IO_BUFFER_SIZE and sendAll() it to serverSock.
+    while (true) {
+        ssize_t bytesRead = recv(c.sock, buffer.data(), IO_BUFFER_SIZE, 0);
+        if (bytesRead <= 0) break; // Client finished sending or disconnected
+        if (!sendAll(connect, buffer.data(), static_cast<size_t>(bytesRead))) break;
+    }
+    shutdown(connect, SHUT_WR); // server knows the string is complete 
+    // Server -> client: repeat recv() from serverSock and sendAll() to clientSock.
+    while (true) {
+        ssize_t bytesRead = recv(connect, buffer.data(), IO_BUFFER_SIZE, 0);
+        if (bytesRead <= 0) break; // Server finished sending reply
+        if (!sendAll(c.sock, buffer.data(), static_cast<size_t>(bytesRead))) break;
+    }
+    //Close both sockets.
+    close_socket(connect);
+    close_socket(c.sock);
     //    If it is -1: sendError "backend server failed to start", close clientSock, return.
     // 3. Client -> server: repeat recv() from clientSock into a buffer of IO_BUFFER_SIZE and sendAll() it to serverSock.
     //    Stop when recv() returns 0 (the client finished sending) or fails.
