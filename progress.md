@@ -53,3 +53,5 @@
 --* Now here  we have added some functions for our console like printing the entire timeline uptil now and what commands we have
 # commit 17
 --* hopefully our last commit for client.cpp in this commit we have created a main  for it 
+# commit 18
+--* HERE WE HAVE STARTED TO WORK ON LOADBALANCER FILE IN THIS PART TILL NO WE HAVE MADE OUR CUSTOM QUEUE , SENDALL FUNCTION AND SEND ERROR FUNCTION WHICH GIVES ERROR MSG  TO USER  INCASE SOMETHING  GOES WRONG

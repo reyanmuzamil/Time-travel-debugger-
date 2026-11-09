@@ -839,7 +839,7 @@ int main(int argc, char* argv[])
         {
             // End of input stream (EOF / Ctrl+D)
             break;
-        }
+        }   
         runCommand(session, inputLine, quitRequested);
     }
 
