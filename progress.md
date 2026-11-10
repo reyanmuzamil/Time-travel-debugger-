@@ -62,3 +62,5 @@
 --* here we have added the function relayoneclient
 # commit 21 
 --* here we have added fucntions in server.cpp so it can respond to the request of clients added some new functions onto this 
+# Commmit 22 
+--* Here we have added some libraries or def for some functions to work in windows so i can test it on windows then move towards linux

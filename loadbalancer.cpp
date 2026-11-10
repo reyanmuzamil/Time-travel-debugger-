@@ -7,14 +7,19 @@
 #include <stdexcept>
 #include <cstring>
 #include <signal.h>
-
+#ifdef _WIN32
+#define fseeko _fseeki64
+#define ftello _ftelli64
+#endif
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <basetsd.h>
 #pragma comment(lib, "ws2_32.lib")
 #define close_socket(s) closesocket(s)
 #define SLEEP_MS(ms) Sleep(ms)
+typedef SSIZE_T ssize_t;
 #else
 #include <unistd.h>
 #include <sys/socket.h>
@@ -23,7 +28,9 @@
 #define close_socket(s) close(s)
 #define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
-
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
 #include "helper.h"
 using namespace std;
 
@@ -342,7 +349,7 @@ void acceptLoop(int listenSock)
         }
 
         char ipStr[INET_ADDRSTRLEN];
-        inet_pton(AF_INET, inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr)), ipStr);
+        inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr)); // converts raw binary ip address into human readable
 
         ClientInfo info;
         info.sock = clientSock;
