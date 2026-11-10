@@ -16,28 +16,47 @@
 #include <string>
 #include <cstdint>
 #include <cstdio>
-#include<fstream>
+#include <fstream>
 #include <cstdlib>
 #include <cstring>
 #include <signal.h>
 #include <vector>
 #include "helper.h"
 #ifdef _WIN32
-      #include <winsock2.h>
-      #include <ws2tcpip.h>
-      #pragma comment(lib, "ws2_32.lib")
-      typedef int socklen_t;
-      #define close_socket closesocket
-      #define SHUT_WR SD_SEND
-      #ifndef MSG_NOSIGNAL
-      #define MSG_NOSIGNAL 0
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <basetsd.h>
+#pragma comment(lib, "ws2_32.lib")
+
+typedef SSIZE_T ssize_t;
+#define close_socket(s) closesocket(s)
+#define SHUT_WR SD_SEND
+#define fseeko _fseeki64
+#define ftello _ftelli64
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
 #endif
+
+inline bool initSockets() {
+    WSADATA wsaData;
+    return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
+}
+inline void cleanupSockets() {
+    WSACleanup();
+}
 #else
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#define close_socket close
+#include <sys/types.h>
+
+#define close_socket(s) close(s)
+
+inline bool initSockets() { return true; }
+inline void cleanupSockets() {}
 #endif
 using namespace std;
 
@@ -154,7 +173,7 @@ int connectToHost(const char* host, int port)
         return -1;
     }// convert ip string into binary
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {// sends TCP SYN packet to initiate 3 way tcp connection 
-        close(sock); // Clean up socket descriptor if connection fails
+        close_socket(sock); // Clean up socket descriptor if connection fails
         return -1;
     }
     return sock;
@@ -338,13 +357,31 @@ bool receiveResponse(int sock, const char* outTdbgPath, string& outError)
 //   header | snapshot 0 | snapshot 1 | ... | index (one 8 byte offset per snapshot)
 // The index lets us jump straight to any step without reading the steps before it.
 // =============================================================================================
-
+bool requestDebugFile(const char* host, int port, const char* sourcePath, const char* outTdbgPath, string& outError)
+{
+    // Connect socket to Load Balancer
+    int sock = connectToHost(host, port);
+    if (sock < 0) {
+        outError = "Failed to connect to load balancer at " + string(host) + ":" + to_string(port);
+        return false;
+    }
+    // Upload the source binary file 
+    if (!uploadSource(sock, sourcePath)) {
+        outError = "Failed to upload source file: " + string(sourcePath);
+        close_socket(sock);
+        return false;
+    }
+    //Receive the response payload and verify with checksum
+    bool success = receiveResponse(sock, outTdbgPath, outError);
+    close_socket(sock);
+    return success;
+}
 bool openTdbg(const char* path, TdbgReader& r)
 {
     FILE* f = fopen(path, "rb");
     if (!f)return false;
     // read 24 byte TTDB header 
-    if (fread(&r.header, sizeof(TTDBHEADER), 1, f) != 1) {
+    if (fread(&r.header, sizeof(TTDBHeader), 1, f) != 1) {
         fclose(f);
         return false;
     }
@@ -386,7 +423,7 @@ void closeTdbg(TdbgReader& r)
     r.header.stepCount = 0;
     r.header.indexOffset = 0;
     r.header.version = 0;
-    r.header.magic[0] = '\0'
+    r.header.magic[0] = '\0';
     // Free r.index and close the file.
 }
 // uses the step index TO GO DIRECTLY TO Exact byte location 
