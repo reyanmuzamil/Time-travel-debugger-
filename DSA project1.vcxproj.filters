@@ -38,6 +38,9 @@
     </None>
     <None Include="session.tdbg" />
     <None Include="git.ignore" />
+    <None Include="test.bin">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="helper.h">

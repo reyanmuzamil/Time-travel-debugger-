@@ -136,9 +136,34 @@ public:
     }
 };
 
-
+// Core structs
+struct Variable
+{
+    string name;
+    int32_t value;
+};
+struct Frame
+{
+    string func_name;
+    int32_t argc;
+    Variable argv[MAX_VARS_PER_FRAME];
+    int64_t returnLine; // FIXED: 64-bit to store file byte offsets accurately
+    Variable locals[MAX_VARS_PER_FRAME];
+    int32_t localCount;
+};
+struct TTDBHeader
+{
+    char magic[4]; // "TTDB"
+    int32_t version;
+    int32_t stepCount;
+    int64_t indexOffset;
+};
 // Timeline : doubly linked list of Snapshots
-struct Snapshot; // fwd declaration;
+struct Snapshot
+{
+    Frame callStack[MAX_STACK_DEPTH];
+    int32_t stackDepth;
+}; 
 struct TimelineNode
 {
     Snapshot* data;
@@ -196,33 +221,6 @@ public:
     }
 };
 
-// Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int64_t returnLine; // FIXED: 64-bit to store file byte offsets accurately
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
-struct TTDBHeader
-{
-    char magic[4]; // "TTDB"
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
@@ -230,21 +228,6 @@ void writeHeader(FILE* f, const TTDBHeader& h)
     fwrite(&h.stepCount, sizeof(int32_t), 1, f);
     fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
-
-// resolver.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolver.bin to seek back and overwrite
-    string targetFuncName;
-};
-
-
-
 // PASS 0x0: READING Source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {

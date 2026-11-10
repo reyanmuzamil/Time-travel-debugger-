@@ -1,0 +1,13 @@
+func main
+set x 10
+set y 5
+add x y
+call calculate x y
+func_end
+
+func calculate
+func num1 num2
+set result 0
+add result num1
+mul result num2
+func_end

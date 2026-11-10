@@ -1,27 +1,31 @@
 #pragma once
 
-
-// Helper.h should contain the structs, functions, constants, etc. that are used more than one time in the project. For example, the structs that are used in both server and client, the constants that are used in all three files. 
+#include <string>
+#include <cstdint>
+#include <cstddef>
 
 struct FuncEntry
 {
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
+    std::string funcName;
+    int64_t byteOffsetInResolveBin;
 };
+
 struct PendingPatch
 {
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
+    int64_t byteOffsetOfOffsetField;
+    std::string targetFuncName;
 };
-inline uint32_t update_crc32(uint32_t crc, const char* buf, size_t len)
+
+inline uint32_t update_crc32(uint32_t crc, const void* buf, size_t len)
 {
+    const uint8_t* byteBuf = static_cast<const uint8_t*>(buf);
     crc = ~crc;
     for (size_t i = 0; i < len; ++i)
     {
-        crc ^= static_cast<uint8_t>(buf[i]);
+        crc ^= byteBuf[i];
         for (int k = 0; k < 8; ++k)
         {
-            crc = (crc >> 1) ^ (0xEDB88320U & (-(crc & 1)));
+            crc = (crc >> 1) ^ (0xEDB88320U & ((crc & 1) ? 0xFFFFFFFFU : 0U));
         }
     }
     return ~crc;
