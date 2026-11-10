@@ -20,6 +20,9 @@
 #define close_socket(s) closesocket(s)
 #define SLEEP_MS(ms) Sleep(ms)
 typedef SSIZE_T ssize_t;
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
 #else
 #include <unistd.h>
 #include <sys/socket.h>
@@ -28,8 +31,8 @@ typedef SSIZE_T ssize_t;
 #define close_socket(s) close(s)
 #define SLEEP_MS(ms) usleep((ms) * 1000)
 #endif
-#ifndef SHUT_WR
-#define SHUT_WR SD_SEND
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
 #endif
 #include "helper.h"
 using namespace std;
@@ -50,10 +53,6 @@ const int STARTUP_POLL_INTERVAL_MS = 100;  // wait between those tries (50 x 100
 int lbPort = 5000;
 string serverHost = "127.0.0.1";           // local loopback address
 int serverPort = 5001;
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
 
 
 // ---- Queue: here it holds client sockets (int). ----
@@ -143,7 +142,7 @@ bool sendAll(int sock, const char* buf, size_t n)
 {
     size_t totalsent = 0;
     while (totalsent < n) {
-        ssize_t bytes = send(sock, buf + totalsent, n - totalsent, MSG_NOSIGNAL);
+        ssize_t bytes = send(sock, buf + totalsent, static_cast<int>(n - totalsent), MSG_NOSIGNAL);
         if (bytes <= 0) return false; // connection closed or error 
         totalsent += static_cast<size_t>(bytes);
     }
@@ -257,7 +256,7 @@ bool startServer(int port)
 #ifdef _WIN32
     command = "start /B " + string(SERVER_PATH) + " " + to_string(port);
 #else
-     command = string(SERVER_PATH) + " " + to_string(port) + " &";
+    command = string(SERVER_PATH) + " " + to_string(port) + " &";
 #endif
     // Build the command text: SERVER_PATH + " " + port as text + "&"
     //   Example: "./server 5001 &"
@@ -300,7 +299,7 @@ void relayOneClient(ClientInfo& c)
     int connect = connectToServerWithWakeup();
     if (connect == -1) {
         sendError(c.sock, "Backend server failed to connect");
-        // close socket
+        close_socket(c.sock); // close socket 
         return;
     }
     vector<char> buffer(IO_BUFFER_SIZE);
@@ -404,8 +403,8 @@ void dispatcherLoop()
     }
     // This runs in the main thread and never ends.
     // Repeat:
-    //   Lock queueMutex, take ONE client out of the queue if there is one, unlock.
-    //   If we got a client: call relayOneClient(). The next client is taken out of the queue only after this one is finished.
+    //    Lock queueMutex, take ONE client out of the queue if there is one, unlock.
+    //    If we got a client: call relayOneClient(). The next client is taken out of the queue only after this one is finished.
 }
 
 void handler(int sg) {

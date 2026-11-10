@@ -66,3 +66,6 @@
 --* Here we have added some libraries or def for some functions to work in windows so i can test it on windows then move towards linux
 # Commit 23
 --* Here we have added some libraries in client.cpp so it can work on windows as well 
+# COmmit 24 
+-- * Here we have dealt with some logical errors we made while writing the code such as if connection failed i didnt close the socket back then logical errors like this etc 
+

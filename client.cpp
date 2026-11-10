@@ -12,6 +12,7 @@
 //   start -> cmdStart()  -> requestDebugFile() (Part A) -> openTdbg() (Part B) -> shows step 1
 //   next, prv, jmp -> moveBy() (Part D) -> readSnapshotAt() (Part B) -> printSnapshot() (Part E)
 
+
 #include <iostream>
 #include <string>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <signal.h>
 #include <vector>
 #include "helper.h"
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -54,6 +56,12 @@ inline void cleanupSockets() {
 #include <sys/types.h>
 
 #define close_socket(s) close(s)
+#ifndef SHUT_WR
+#define SHUT_WR 1
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 inline bool initSockets() { return true; }
 inline void cleanupSockets() {}
@@ -106,7 +114,7 @@ struct TTDBHeader
 // ---- Structs only the client needs ----
 struct TdbgReader
 {
-    size_t file_index; // file stream pointer keeps the file open so client doesnot always have to open it again and again 
+    FILE* file;          // Store the file handle directly as a pointer 
     TTDBHeader header; 
     vector<int64_t> index;
 };
@@ -194,27 +202,23 @@ bool uploadSource(int sock, const char* sourcePath)
         streamsize bytesRead = source.gcount();
         if (bytesRead <= 0) break;
 
-        // 1. Calculate rolling checksum on chunk
+        //Calculate rolling checksum on chunk
         checksum = update_crc32(checksum, buffer, static_cast<size_t>(bytesRead));
 
-        // 2. Send chunk over socket
+        // Send chunk over socket
         if (!sendAll(sock, buffer, static_cast<size_t>(bytesRead)))
         {
             source.close();
             return false;
         }
     }
-
     source.close();
-
-    // 3. Append 4-byte CRC32 Checksum Trailer at end of file stream
+    // Append 4byte  Checksum Trailer at end of file stream
     uint32_t netChecksum = htonl(checksum);
     if (!sendAll(sock, reinterpret_cast<const char*>(&netChecksum), sizeof(netChecksum)))
     {
         return false;
     }
-
-    // 4. Half-close socket to signal upload completion to Load Balancer
     shutdown(sock, SHUT_WR);
 
     return true;
@@ -407,17 +411,16 @@ bool openTdbg(const char* path, TdbgReader& r)
             return false;
         }
     }
-    r.file_index = reinterpret_cast<ssize_t>(f);
+    r.file=f;
     return true;
 }
 void closeTdbg(TdbgReader& r)
 {
     // closing file 
-    if (r.file_index != 0 && r.file_index != -1)
+    if (r.file != nullptr)
     {
-        FILE* f = reinterpret_cast<FILE*>(r.file_index);
-        fclose(f);
-        r.file_index = -1;
+        fclose(r.file);
+        r.file = nullptr;
     }
     r.index.clear();
     r.header.stepCount = 0;
@@ -429,14 +432,14 @@ void closeTdbg(TdbgReader& r)
 // uses the step index TO GO DIRECTLY TO Exact byte location 
 Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 {
-    if (step<0 and step>=r.header.stepCount)return nullptr; // out of bounds check
+    if (step<0 || step>=r.header.stepCount)return nullptr; // out of bounds check
     // jump to target offset
-    if (r.file_index == 0 || r.file_index == -1)
+    if (r.file==nullptr)
     {
         return nullptr;
     }
     // seeking to the exact byte position 
-    FILE* f = reinterpret_cast<FILE*>(r.file_index);
+    FILE* f = r.file;
     int64_t targetByteOffset = r.index[step];
     if (fseeko(f, targetByteOffset, SEEK_SET) != 0)
     {
@@ -456,7 +459,10 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 
         // reading function name 
         int32_t nameLen = 0;
-        if (fread(&nameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        if (fread(&nameLen, sizeof(int32_t), 1, f) != 1) { 
+        delete s; 
+        return nullptr; 
+        }
         if (nameLen > 0)
         {
             vector<char> nameBuf(nameLen + 1, '\0');
@@ -469,14 +475,23 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
         }
 
         //  read return Line
-        if (fread(&(frame.returnLine), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        if (fread(&(frame.returnLine), sizeof(int32_t), 1, f) != 1) {
+        delete s; 
+        return nullptr;
+        }
 
         //  read positional arguments 
-        if (fread(&(frame.argc), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        if (fread(&(frame.argc), sizeof(int32_t), 1, f) != 1) { 
+            delete s;
+            return nullptr;
+        }
         for (int32_t a = 0; a < frame.argc; a++)
         {
             int32_t argNameLen = 0;
-            if (fread(&argNameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+            if (fread(&argNameLen, sizeof(int32_t), 1, f) != 1) { 
+                delete s;
+            return nullptr;
+            }
 
             if (argNameLen > 0)
             {
@@ -489,15 +504,22 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
                 frame.argv[a].name = "";
             }
 
-            if (fread(&(frame.argv[a].value), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+            if (fread(&(frame.argv[a].value), sizeof(int32_t), 1, f) != 1) { 
+            delete s;
+            return nullptr; 
+            }
         }
 
         // Read Local Variables
-        if (fread(&(frame.localCount), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+        if (fread(&(frame.localCount), sizeof(int32_t), 1, f) != 1) { 
+            delete s; 
+            return nullptr; }
         for (int32_t v = 0; v < frame.localCount; v++)
         {
             int32_t varNameLen = 0;
-            if (fread(&varNameLen, sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+            if (fread(&varNameLen, sizeof(int32_t), 1, f) != 1) { 
+            delete s; 
+            return nullptr; }
 
             if (varNameLen > 0)
             {
@@ -510,7 +532,10 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
                 frame.locals[v].name = "";
             }
 
-            if (fread(&(frame.locals[v].value), sizeof(int32_t), 1, f) != 1) { delete s; return nullptr; }
+            if (fread(&(frame.locals[v].value), sizeof(int32_t), 1, f) != 1) { 
+                delete s; 
+                return nullptr; 
+            }
         }
     }
 
@@ -528,7 +553,7 @@ void initSession(DebugSession& s)
 {
     s.active_flag = 0;
     s.currentStep = 0;
-    s.reader.file_index = -1;
+    s.reader.file = nullptr;
     s.reader.index.clear();
     s.reader.header.indexOffset = 0;
     s.reader.header.stepCount = 0;
@@ -596,7 +621,7 @@ bool cmdStart(DebugSession& s, const string& sourcePath)
 
     //Open downloaded file into a TEMPORARY local TdbgReader first
     TdbgReader tempReader;
-    tempReader.file_index = -1;
+    tempReader.file = nullptr;
     tempReader.header.stepCount = 0;
     tempReader.header.indexOffset = 0;
 

@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
-#include<vector>
+#include <vector>
 #include "helper.h"
 #ifdef _WIN32
 #define fseeko _fseeki64
@@ -119,12 +119,19 @@ public:
     {
         int32_t written = 0;
         Node* current = top;
-        while (current != nullptr and written < maxLen) {
+        while (current != nullptr && written < maxLen) {
             out[written++] = current->data;
             current = current->next;
         }
+
+        // Reverse so index 0 is main (bottom) and highest index is top of stack
+        for (int32_t i = 0; i < written / 2; i++) {
+            T temp = out[i];
+            out[i] = out[written - 1 - i];
+            out[written - 1 - i] = temp;
+        }
         return written;
-        // copies every frame, top to bottom in the array given as a parameter
+        // copies every frame, bottom to top in the array given as a parameter
         // this is what buildSnapshot() call, returns count written
     }
 };
@@ -200,7 +207,7 @@ struct Frame
     string func_name;
     int32_t argc;
     Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
+    int64_t returnLine; // FIXED: 64-bit to store file byte offsets accurately
     Variable locals[MAX_VARS_PER_FRAME];
     int32_t localCount;
 };
@@ -489,14 +496,6 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     }
 
     return mainEntryOffset;
-    // Every source line becomes one record holding the raw line, as-is.
-    // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
-    // (remember its position) and CALL (remember which function it needs
-    // and where its offset field sits).
-    // Once the whole file is written, every CALL's offset field is patched
-    // with its target's position. Patching happens after the full write
-    // Returns the byte offset of main's FUNC header record.
-    // if there is no main return the error 
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
@@ -521,19 +520,18 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
             if (!word.empty()) {
                 if (count == maxTokens) return count;
                 tokens[count].text = word;
-                if (count == 0) tokens[count].type = TOKEN_KEYWORD; // first is keywprd
-                else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER; // second word is identifier
-                else tokens[count].type = TOKEN_PARAM; // arguments 
+                if (count == 0) tokens[count].type = TOKEN_KEYWORD;
+                else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER;
+                else tokens[count].type = TOKEN_PARAM;
 
                 count++;
-                word = ""; // Resetting word for next token
+                word = "";
             }
         }
         else {
             word += line[i];
         }
     }
-    // Process  final word at the end of the line
     if (!word.empty() && count < maxTokens) {
         tokens[count].text = word;
         if (count == 0) tokens[count].type = TOKEN_KEYWORD;
@@ -542,17 +540,12 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
         count++;
     }
     return count;
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
 }
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     Snapshot* s = new Snapshot();
     s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
     return s;
-    // build the snapshot based on the callStack given
 }
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
@@ -562,7 +555,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         throw runtime_error("Runtime Error could not open binary file '" + string(resolveBinPath) + "'.");
     }
 
-    // Main entry Point Validation
     if (mainOffset < 0) {
         fclose(f);
         throw runtime_error("Runtime Error invalid main entry point offset (" + to_string(mainOffset) + ").");
@@ -570,7 +562,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
     Stack<Frame> call_stack;
 
-    // initialize Base main Frame
     Frame mainFrame;
     mainFrame.func_name = "main";
     mainFrame.argc = 0;
@@ -579,7 +570,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
     call_stack.push(mainFrame);
 
-    // Jump to the main function entry point in resolver.bin
     fseeko(f, mainOffset, SEEK_SET);
 
     while (!call_stack.isEmpty()) {
@@ -591,11 +581,10 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
         Token tokens[MAX_TOKENS];
         string line = "";
 
-        // Read binary record 
         int64_t targetOffset = readResolveRecord(f, line);
 
         if (line.empty()) {
-            break; // End of file reached
+            break;
         }
 
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
@@ -610,7 +599,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
         string op = tokens[0].text;
         Frame& currentFrame = call_stack.peek();
-        // SET INSTRUCTION 
+
         if (op == "set") {
             if (token_count < 3) {
                 fclose(f);
@@ -651,7 +640,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             }
         }
 
-        //  ARITHMETIC INSTRUCTIONS
         else if (op == "add" || op == "sub" || op == "mul" || op == "div") {
             if (token_count < 3) {
                 fclose(f);
@@ -661,7 +649,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             string dest_name = tokens[1].text;
             string src_name = tokens[2].text;
 
-            // Resolve destination variable
             Variable* destVar = nullptr;
             for (int i = 0; i < currentFrame.argc; i++) {
                 if (currentFrame.argv[i].name == dest_name) { destVar = &currentFrame.argv[i]; break; }
@@ -677,7 +664,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 throw runtime_error("Runtime Error destination variable '" + dest_name + "' is not defined in frame '" + currentFrame.func_name + "'.");
             }
 
-            // Resolve source operand
             Variable* srcVar = nullptr;
             for (int i = 0; i < currentFrame.argc; i++) {
                 if (currentFrame.argv[i].name == src_name) { srcVar = &currentFrame.argv[i]; break; }
@@ -712,16 +698,14 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 destVar->value *= src_val;
             }
             else if (op == "div") {
-                //  Division by zero
                 if (src_val == 0) {
                     fclose(f);
-                    throw runtime_error("Math Error Division by zero  is not possible its encounted in frame '" + currentFrame.func_name + "'.");
+                    throw runtime_error("Math Error Division by zero is not possible its encounted in frame '" + currentFrame.func_name + "'.");
                 }
                 destVar->value /= src_val;
             }
         }
 
-        //  CALL INSTRUCTION 
         else if (op == "call") {
             if (token_count < 2) {
                 fclose(f);
@@ -730,16 +714,15 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (targetOffset < 0) {
                 fclose(f);
-                throw runtime_error("Linker Error  unresolved jump target for function '" + tokens[1].text + "'.");
+                throw runtime_error("Linker Error unresolved jump target for function '" + tokens[1].text + "'.");
             }
 
             Frame new_frame;
             new_frame.func_name = tokens[1].text;
             new_frame.localCount = 0;
             new_frame.argc = 0;
-            new_frame.returnLine = (int32_t)ftello(f); // Save return offset
+            new_frame.returnLine = ftello(f); // FIXED: 64-bit return offset
 
-            // Bind function call parameters
             for (int i = 2; i < token_count; i++) {
                 if (new_frame.argc >= MAX_VARS_PER_FRAME) {
                     fclose(f);
@@ -780,7 +763,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             fseeko(f, targetOffset, SEEK_SET);
         }
 
-        //  FUNC HEADER INSTRUCTION 
         else if (op == "func") {
             int expArgc = token_count - 2;
             if (currentFrame.argc != expArgc) {
@@ -788,43 +770,34 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 throw runtime_error("Runtime Error argument count mismatch for '" + currentFrame.func_name + "'. Expected " + to_string(expArgc) + ", got " + to_string(currentFrame.argc) + ".");
             }
 
-            // Bind names to passed argument values
             for (int i = 2; i < token_count; i++) {
                 currentFrame.argv[i - 2].name = tokens[i].text;
             }
         }
 
-        //  FUNC_END INSTRUCTION 
         else if (op == "func_end") {
-            int32_t address = currentFrame.returnLine;
+            int64_t address = currentFrame.returnLine;
             call_stack.pop();
 
             if (address != -1) {
                 fseeko(f, address, SEEK_SET);
             }
             else {
-                break; // Exit loop when pops
+                break;
             }
         }
 
-        //  UNRECOGNIZED INSTRUCTION CHECK
         else {
             fclose(f);
             throw runtime_error("Runtime Execution Error invalid or unrecognized instruction '" + op + "'.");
         }
 
-        // Record execution step into timeline
         Snapshot* ss = buildSnapshot(call_stack);
         timeline.record(ss);
     }
 
     fclose(f);
-}    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
-
-    // implementation:
-    // execute line by line, and according to the keyword perform action
+}
 
 // PASS 0x3: SERIALIZE TIMELINE
 bool writeTdbg(Timeline& timeline, const char* traceBinPath)
@@ -835,7 +808,7 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
     int32_t totalSteps = timeline.getStepCount();
     if (totalSteps == 0) {
         fclose(f);
-        throw runtime_error("Warning Attempt to write the trace file with 0  recorded steps ");
+        throw runtime_error("Warning Attempt to write the trace file with 0 recorded steps ");
     }
     TTDBHeader header;
     header.magic[0] = 'T';
@@ -848,36 +821,30 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
 
     fwrite(&header, sizeof(TTDBHeader), 1, f);
 
-    // Array to hold the file position of each snapshot for the index table
     int64_t* stepOffsets = new int64_t[totalSteps];
     int32_t stepIndex = 0;
 
     TimelineNode* current = timeline.begin();
 
     while (current != nullptr && stepIndex < totalSteps) {
-        // Record current disk offset for Step 3's Index Table
         stepOffsets[stepIndex++] = ftello(f);
 
         Snapshot* s = current->data;
 
-        // Write stack depth for this snapshot
         fwrite(&(s->stackDepth), sizeof(int32_t), 1, f);
 
-        // Serialize each frame in the snapshot's call stack
         for (int32_t i = 0; i < s->stackDepth; i++) {
             Frame& frame = s->callStack[i];
 
-            // Write Function Name
             int32_t nameLen = (int32_t)frame.func_name.size();
             fwrite(&nameLen, sizeof(int32_t), 1, f);
             if (nameLen > 0) {
                 fwrite(frame.func_name.c_str(), sizeof(char), nameLen, f);
             }
 
-            // Return Line / Offset
-            fwrite(&(frame.returnLine), sizeof(int32_t), 1, f);
+            int32_t retLine32 = static_cast<int32_t>(frame.returnLine);
+            fwrite(&retLine32, sizeof(int32_t), 1, f);
 
-            // Positional Arguments 
             fwrite(&(frame.argc), sizeof(int32_t), 1, f);
             for (int32_t a = 0; a < frame.argc; a++) {
                 int32_t argNameLen = (int32_t)frame.argv[a].name.size();
@@ -888,7 +855,6 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
                 fwrite(&(frame.argv[a].value), sizeof(int32_t), 1, f);
             }
 
-            // Local Variables
             fwrite(&(frame.localCount), sizeof(int32_t), 1, f);
             for (int32_t v = 0; v < frame.localCount; v++) {
                 int32_t varNameLen = (int32_t)frame.locals[v].name.size();
@@ -908,7 +874,6 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
         fwrite(stepOffsets, sizeof(int64_t), totalSteps, f);
     }
 
-    //  Backpatch header.indexOffset with the actual index table offset
     header.indexOffset = indexTableStart;
     fseeko(f, 0, SEEK_SET);
     fwrite(&header, sizeof(TTDBHeader), 1, f);
@@ -919,8 +884,7 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
     return true;
 }
 
-// network error checks 
-// Add sendAll helper right above sendServerError:
+// Network Helpers
 bool sendAll(int sock, const char* buf, size_t n)
 {
     size_t totalsent = 0;
@@ -933,7 +897,7 @@ bool sendAll(int sock, const char* buf, size_t n)
 }
 void sendServerError(int sock, const string& msg)
 {
-    char statusByte = 1; // Status 1 = Error
+    char statusByte = 1;
     uint32_t crc = 0;
     crc = update_crc32(crc, &statusByte, 1);
     crc = update_crc32(crc, msg.data(), msg.size());
@@ -950,7 +914,7 @@ void sendServerError(int sock, const string& msg)
 
 void sendServerSuccess(int sock, const vector<char>& tdbgData)
 {
-    char statusByte = 0; // Status 0 = Success
+    char statusByte = 0;
     uint32_t crc = 0;
     crc = update_crc32(crc, &statusByte, 1);
     crc = update_crc32(crc, tdbgData.data(), tdbgData.size());
@@ -993,7 +957,7 @@ int createListenSocket(int port)
 void printTimelineToConsole(Timeline& timeline)
 {
     cout << "\n";
-    cout << "               EXECUTION TIMELINE HISTORY              \n";
+    cout << "               EXECUTION TIMELINE HISTORY               \n";
     cout << "\n";
 
     TimelineNode* current = timeline.begin();
@@ -1034,17 +998,15 @@ void printTimelineToConsole(Timeline& timeline)
     cout << "Total Steps Recorded: " << timeline.getStepCount() << "\n\n";
 }
 
-// main section
+// Main Routine
 int main(int argc, char* argv[])
 {
 #ifdef _WIN32
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
-
     int port = 5001;
     if (argc >= 2) port = atoi(argv[1]);
-
     int listenSock = createListenSocket(port);
     if (listenSock < 0)
     {
@@ -1052,15 +1014,12 @@ int main(int argc, char* argv[])
         return 1;
     }
     cout << "[Server] Listening on port " << port << "..." << endl;
-
     while (true)
     {
         struct sockaddr_in clientAddr;
         socklen_t addrLen = sizeof(clientAddr);
         int sock = static_cast<int>(accept(listenSock, (struct sockaddr*)&clientAddr, &addrLen));
         if (sock < 0) continue;
-
-        // 1. Receive raw source binary payload from Load Balancer
         vector<char> incomingData;
         char buffer[4096];
         while (true)
@@ -1069,31 +1028,24 @@ int main(int argc, char* argv[])
             if (bytes <= 0) break;
             incomingData.insert(incomingData.end(), buffer, buffer + static_cast<size_t>(bytes));
         }
-
         if (incomingData.size() < 4)
         {
             sendServerError(sock, "invalid or empty upload payload");
             close_socket(sock);
             continue;
         }
-
-        // 2. Extract and verify CRC-32 checksum (last 4 bytes)
         size_t payloadLen = incomingData.size() - 4;
         uint32_t receivedCrc;
         memcpy(&receivedCrc, incomingData.data() + payloadLen, 4);
         receivedCrc = ntohl(receivedCrc);
-
         uint32_t computedCrc = 0;
         computedCrc = update_crc32(computedCrc, incomingData.data(), payloadLen);
-
         if (computedCrc != receivedCrc)
         {
             sendServerError(sock, "upload checksum mismatch");
             close_socket(sock);
             continue;
         }
-
-        // 3. Write source binary payload to disk as "Source.bin"
         ofstream sourceFile("Source.bin", ios::binary);
         if (!sourceFile.is_open())
         {
@@ -1103,8 +1055,6 @@ int main(int argc, char* argv[])
         }
         sourceFile.write(incomingData.data(), payloadLen);
         sourceFile.close();
-
-        // 4. Run Execution Pipeline Passes (Pass 0x0 -> Pass 0x3)
         Timeline timeline;
         try
         {
@@ -1114,12 +1064,9 @@ int main(int argc, char* argv[])
                 close_socket(sock);
                 continue;
             }
-
             int64_t mainOffset = resolveProgram("Source.bin", "resolver.bin");
             executeProgram("resolver.bin", mainOffset, timeline);
             writeTdbg(timeline, "session.tdbg");
-
-            // 5. Read generated session.tdbg and stream binary back to client
             ifstream tdbgFile("session.tdbg", ios::binary | ios::ate);
             if (!tdbgFile.is_open())
             {
@@ -1127,24 +1074,19 @@ int main(int argc, char* argv[])
                 close_socket(sock);
                 continue;
             }
-
             streamsize size = tdbgFile.tellg();
             tdbgFile.seekg(0, ios::beg);
             vector<char> tdbgBuffer(size);
             tdbgFile.read(tdbgBuffer.data(), size);
             tdbgFile.close();
-
             sendServerSuccess(sock, tdbgBuffer);
         }
         catch (const exception& e)
         {
-            // Transmit execution/parsing runtime exceptions over the wire
             sendServerError(sock, string(e.what()));
         }
-
         close_socket(sock);
     }
-
     close_socket(listenSock);
 #ifdef _WIN32
     WSACleanup();
