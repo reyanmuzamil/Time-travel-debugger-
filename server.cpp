@@ -17,9 +17,23 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include<vector>
+#include "helper.h"
 #ifdef _WIN32
 #define fseeko _fseeki64
 #define ftello _ftelli64
+#endif
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+typedef SSIZE_T ssize_t; // Windows fallback
+#define close_socket(s) closesocket(s)
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#define close_socket(s) close(s)
 #endif
 
 using namespace std;
@@ -486,15 +500,15 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
-enum TokenType
+enum _TTokenType
 {
-    KEYWORD,
-    IDENTIFIER,
-    PARAM
+    TOKEN_KEYWORD,
+    TOKEN_IDENTIFIER,
+    TOKEN_PARAM
 };
 struct Token
 {
-    TokenType type;
+    _TTokenType type;
     string text;
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
@@ -507,9 +521,9 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
             if (!word.empty()) {
                 if (count == maxTokens) return count;
                 tokens[count].text = word;
-                if (count == 0) tokens[count].type = KEYWORD; // first is keywprd
-                else if (count == 1) tokens[count].type = IDENTIFIER; // second word is identifier
-                else tokens[count].type = PARAM; // arguments 
+                if (count == 0) tokens[count].type = TOKEN_KEYWORD; // first is keywprd
+                else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER; // second word is identifier
+                else tokens[count].type = TOKEN_PARAM; // arguments 
 
                 count++;
                 word = ""; // Resetting word for next token
@@ -522,9 +536,9 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
     // Process  final word at the end of the line
     if (!word.empty() && count < maxTokens) {
         tokens[count].text = word;
-        if (count == 0) tokens[count].type = KEYWORD;
-        else if (count == 1) tokens[count].type = IDENTIFIER;
-        else tokens[count].type = PARAM;
+        if (count == 0) tokens[count].type = TOKEN_KEYWORD;
+        else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER;
+        else tokens[count].type = TOKEN_PARAM;
         count++;
     }
     return count;
@@ -905,7 +919,77 @@ bool writeTdbg(Timeline& timeline, const char* traceBinPath)
     return true;
 }
 
+// network error checks 
+// Add sendAll helper right above sendServerError:
+bool sendAll(int sock, const char* buf, size_t n)
+{
+    size_t totalsent = 0;
+    while (totalsent < n) {
+        ssize_t bytes = send(sock, buf + totalsent, static_cast<int>(n - totalsent), 0);
+        if (bytes <= 0) return false;
+        totalsent += static_cast<size_t>(bytes);
+    }
+    return true;
+}
+void sendServerError(int sock, const string& msg)
+{
+    char statusByte = 1; // Status 1 = Error
+    uint32_t crc = 0;
+    crc = update_crc32(crc, &statusByte, 1);
+    crc = update_crc32(crc, msg.data(), msg.size());
 
+    string packet;
+    packet.push_back(statusByte);
+    packet.append(msg);
+
+    uint32_t netCrc = htonl(crc);
+    packet.append(reinterpret_cast<const char*>(&netCrc), 4);
+
+    sendAll(sock, packet.data(), packet.size());
+}
+
+void sendServerSuccess(int sock, const vector<char>& tdbgData)
+{
+    char statusByte = 0; // Status 0 = Success
+    uint32_t crc = 0;
+    crc = update_crc32(crc, &statusByte, 1);
+    crc = update_crc32(crc, tdbgData.data(), tdbgData.size());
+
+    string packet;
+    packet.push_back(statusByte);
+    packet.append(tdbgData.data(), tdbgData.size());
+
+    uint32_t netCrc = htonl(crc);
+    packet.append(reinterpret_cast<const char*>(&netCrc), 4);
+
+    sendAll(sock, packet.data(), packet.size());
+}
+int createListenSocket(int port)
+{
+    int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    if (sock < 0) return -1;
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close_socket(sock);
+        return -1;
+    }
+
+    if (listen(sock, 16) < 0) {
+        close_socket(sock);
+        return -1;
+    }
+
+    return sock;
+}
 void printTimelineToConsole(Timeline& timeline)
 {
     cout << "\n";
@@ -951,28 +1035,119 @@ void printTimelineToConsole(Timeline& timeline)
 }
 
 // main section
-int32_t main()
+int main(int argc, char* argv[])
 {
-    Timeline timeline;
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
 
-    try {
-        if (!validateProgram("Source.bin")) return 1;
+    int port = 5001;
+    if (argc >= 2) port = atoi(argv[1]);
 
-        int64_t mainOffset = resolveProgram("Source.bin", "resolver.bin");
-
-        executeProgram("resolver.bin", mainOffset, timeline);
-        printTimelineToConsole(timeline);
-        writeTdbg(timeline, "session.tdbg");
-    }
-    catch (const exception& e) {
-        cerr << "\n[Error Caught]: " << e.what() << endl;
-
-        if (timeline.getStepCount() > 0) {
-            cout << "\nPrinting execution history recorded prior to failure:";
-            printTimelineToConsole(timeline);
-        }
+    int listenSock = createListenSocket(port);
+    if (listenSock < 0)
+    {
+        cerr << "[Server] Failed to create listen socket on port " << port << endl;
         return 1;
     }
+    cout << "[Server] Listening on port " << port << "..." << endl;
 
+    while (true)
+    {
+        struct sockaddr_in clientAddr;
+        socklen_t addrLen = sizeof(clientAddr);
+        int sock = static_cast<int>(accept(listenSock, (struct sockaddr*)&clientAddr, &addrLen));
+        if (sock < 0) continue;
+
+        // 1. Receive raw source binary payload from Load Balancer
+        vector<char> incomingData;
+        char buffer[4096];
+        while (true)
+        {
+            ssize_t bytes = recv(sock, buffer, sizeof(buffer), 0);
+            if (bytes <= 0) break;
+            incomingData.insert(incomingData.end(), buffer, buffer + static_cast<size_t>(bytes));
+        }
+
+        if (incomingData.size() < 4)
+        {
+            sendServerError(sock, "invalid or empty upload payload");
+            close_socket(sock);
+            continue;
+        }
+
+        // 2. Extract and verify CRC-32 checksum (last 4 bytes)
+        size_t payloadLen = incomingData.size() - 4;
+        uint32_t receivedCrc;
+        memcpy(&receivedCrc, incomingData.data() + payloadLen, 4);
+        receivedCrc = ntohl(receivedCrc);
+
+        uint32_t computedCrc = 0;
+        computedCrc = update_crc32(computedCrc, incomingData.data(), payloadLen);
+
+        if (computedCrc != receivedCrc)
+        {
+            sendServerError(sock, "upload checksum mismatch");
+            close_socket(sock);
+            continue;
+        }
+
+        // 3. Write source binary payload to disk as "Source.bin"
+        ofstream sourceFile("Source.bin", ios::binary);
+        if (!sourceFile.is_open())
+        {
+            sendServerError(sock, "failed to create Source.bin on server disk");
+            close_socket(sock);
+            continue;
+        }
+        sourceFile.write(incomingData.data(), payloadLen);
+        sourceFile.close();
+
+        // 4. Run Execution Pipeline Passes (Pass 0x0 -> Pass 0x3)
+        Timeline timeline;
+        try
+        {
+            if (!validateProgram("Source.bin"))
+            {
+                sendServerError(sock, "program validation failed");
+                close_socket(sock);
+                continue;
+            }
+
+            int64_t mainOffset = resolveProgram("Source.bin", "resolver.bin");
+            executeProgram("resolver.bin", mainOffset, timeline);
+            writeTdbg(timeline, "session.tdbg");
+
+            // 5. Read generated session.tdbg and stream binary back to client
+            ifstream tdbgFile("session.tdbg", ios::binary | ios::ate);
+            if (!tdbgFile.is_open())
+            {
+                sendServerError(sock, "failed to open session.tdbg after generation");
+                close_socket(sock);
+                continue;
+            }
+
+            streamsize size = tdbgFile.tellg();
+            tdbgFile.seekg(0, ios::beg);
+            vector<char> tdbgBuffer(size);
+            tdbgFile.read(tdbgBuffer.data(), size);
+            tdbgFile.close();
+
+            sendServerSuccess(sock, tdbgBuffer);
+        }
+        catch (const exception& e)
+        {
+            // Transmit execution/parsing runtime exceptions over the wire
+            sendServerError(sock, string(e.what()));
+        }
+
+        close_socket(sock);
+    }
+
+    close_socket(listenSock);
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }

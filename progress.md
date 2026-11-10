@@ -60,3 +60,5 @@
 
 # Commit 20
 --* here we have added the function relayoneclient
+# commit 21 
+--* here we have added fucntions in server.cpp so it can respond to the request of clients added some new functions onto this 

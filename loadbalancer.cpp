@@ -330,6 +330,37 @@ void relayOneClient(ClientInfo& c)
 
 void acceptLoop(int listenSock)
 {
+    while (flag)
+    {
+        struct sockaddr_in clientAddr;
+        socklen_t addrLen = sizeof(clientAddr);
+        int clientSock = static_cast<int>(accept(listenSock, (struct sockaddr*)&clientAddr, &addrLen));
+        if (clientSock < 0)
+        {
+            if (!flag) break;
+            continue; // Keep going if accept() fails
+        }
+
+        char ipStr[INET_ADDRSTRLEN];
+        inet_pton(AF_INET, inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr)), ipStr);
+
+        ClientInfo info;
+        info.sock = clientSock;
+        info.address = string(ipStr);
+        info.port = ntohs(clientAddr.sin_port);
+        info.arrivedAt = time(nullptr);
+
+        lock_guard<mutex> lock(queueMutex);
+        if (pendingClients.size() >= MAX_PENDING_CLIENTS)
+        {
+            sendError(clientSock, "server busy, try again later");
+            close_socket(clientSock);
+        }
+        else
+        {
+            pendingClients.enqueue(info);
+        }
+    }
     // Repeat: accept() a new client. 
     //  If pendingClients.size() is already MAX_PENDING_CLIENTS: unlock, sendError "server busy, try again later",
     // else
@@ -341,6 +372,29 @@ void acceptLoop(int listenSock)
 }
 void dispatcherLoop()
 {
+    while (flag)
+    {
+        ClientInfo c;
+        bool hasClient = false;
+
+        {
+            lock_guard<mutex> lock(queueMutex);
+            if (!pendingClients.isEmpty())
+            {
+                c = pendingClients.dequeue();
+                hasClient = true;
+            }
+        }
+
+        if (hasClient)
+        {
+            relayOneClient(c);
+        }
+        else
+        {
+            SLEEP_MS(10); // Brief sleep to avoid high CPU usage when queue is empty
+        }
+    }
     // This runs in the main thread and never ends.
     // Repeat:
     //   Lock queueMutex, take ONE client out of the queue if there is one, unlock.
@@ -353,10 +407,30 @@ void handler(int sg) {
 }
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
 
-    signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set so insead of using infinite loop you can loop on flag to safely close things and exit
+    if (argc >= 2) lbPort = atoi(argv[1]);
+    if (argc >= 3) serverPort = atoi(argv[2]);
+
+    signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set
+
+    int listenSock = createListenSocket(lbPort);
+
+    thread acceptorThread(acceptLoop, listenSock);
+    acceptorThread.detach();
+
+    dispatcherLoop();
+
+    close_socket(listenSock);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+
+    return 0;
     // 2. listenSock = createListenSocket(LB_PORT).
     // 3. Start a thread that runs acceptLoop(listenSock) and detach it.
     // 4. Call dispatcherLoop().
-    return 0;
 }
