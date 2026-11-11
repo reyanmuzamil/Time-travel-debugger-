@@ -54,7 +54,7 @@ inline void cleanupSockets() {
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/types.h>
-
+cd ".\x64\Debug"
 #define close_socket(s) close(s)
 #ifndef SHUT_WR
 #define SHUT_WR 1
@@ -74,7 +74,7 @@ const char* PROMPT = "ttdb> ";
 const int IO_BUFFER_SIZE = 64 * 1024;     // fixed buffer for streaming files to and from the socket
 const char* TDBG_FILE = "ttdb_last.tdbg"; // where the downloaded .tdbg is saved
 const int MAX_JUMP = 1000000000;          // biggest n accepted by jmp
-string LB_HOST = "127.0.0.0";
+string LB_HOST = "127.0.0.1";
 int LB_PORT = 5000;
 
 // These two must be the same as in Phase 1

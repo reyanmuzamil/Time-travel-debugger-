@@ -47,6 +47,7 @@ const int32_t MAX_PATCHES = MAX_FUNCS * 4;
 const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
 const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
 const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
+const int32_t MAX_ALLOWED_CLIENTS = 8;                     // Maximum concurrent active client limit
 
 // ---- Custom data structures
 
@@ -163,7 +164,7 @@ struct Snapshot
 {
     Frame callStack[MAX_STACK_DEPTH];
     int32_t stackDepth;
-}; 
+};
 struct TimelineNode
 {
     Snapshot* data;
@@ -930,7 +931,7 @@ int createListenSocket(int port)
         return -1;
     }
 
-    if (listen(sock, 16) < 0) {
+    if (listen(sock, SOMAXCONN) < 0) {
         close_socket(sock);
         return -1;
     }
@@ -940,7 +941,7 @@ int createListenSocket(int port)
 void printTimelineToConsole(Timeline& timeline)
 {
     cout << "\n";
-    cout << "               EXECUTION TIMELINE HISTORY               \n";
+    cout << "                EXECUTION TIMELINE HISTORY                \n";
     cout << "\n";
 
     TimelineNode* current = timeline.begin();
@@ -997,12 +998,26 @@ int main(int argc, char* argv[])
         return 1;
     }
     cout << "[Server] Listening on port " << port << "..." << endl;
+
+    int32_t current_active_clients = 0;
+
     while (true)
     {
         struct sockaddr_in clientAddr;
         socklen_t addrLen = sizeof(clientAddr);
         int sock = static_cast<int>(accept(listenSock, (struct sockaddr*)&clientAddr, &addrLen));
         if (sock < 0) continue;
+
+        // Capacity Check: reject client if active connections exceed capacity limit
+        if (current_active_clients >= MAX_ALLOWED_CLIENTS)
+        {
+            sendServerError(sock, "Server capacity reached (Max " + to_string(MAX_ALLOWED_CLIENTS) + " clients). Connection rejected.");
+            close_socket(sock);
+            continue;
+        }
+
+        current_active_clients++;
+
         vector<char> incomingData;
         char buffer[4096];
         while (true)
@@ -1015,6 +1030,7 @@ int main(int argc, char* argv[])
         {
             sendServerError(sock, "invalid or empty upload payload");
             close_socket(sock);
+            current_active_clients--;
             continue;
         }
         size_t payloadLen = incomingData.size() - 4;
@@ -1027,6 +1043,7 @@ int main(int argc, char* argv[])
         {
             sendServerError(sock, "upload checksum mismatch");
             close_socket(sock);
+            current_active_clients--;
             continue;
         }
         ofstream sourceFile("Source.bin", ios::binary);
@@ -1034,6 +1051,7 @@ int main(int argc, char* argv[])
         {
             sendServerError(sock, "failed to create Source.bin on server disk");
             close_socket(sock);
+            current_active_clients--;
             continue;
         }
         sourceFile.write(incomingData.data(), payloadLen);
@@ -1045,6 +1063,7 @@ int main(int argc, char* argv[])
             {
                 sendServerError(sock, "program validation failed");
                 close_socket(sock);
+                current_active_clients--;
                 continue;
             }
             int64_t mainOffset = resolveProgram("Source.bin", "resolver.bin");
@@ -1055,6 +1074,7 @@ int main(int argc, char* argv[])
             {
                 sendServerError(sock, "failed to open session.tdbg after generation");
                 close_socket(sock);
+                current_active_clients--;
                 continue;
             }
             streamsize size = tdbgFile.tellg();
@@ -1069,6 +1089,7 @@ int main(int argc, char* argv[])
             sendServerError(sock, string(e.what()));
         }
         close_socket(sock);
+        current_active_clients--;
     }
     close_socket(listenSock);
 #ifdef _WIN32

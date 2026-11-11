@@ -68,4 +68,5 @@
 --* Here we have added some libraries in client.cpp so it can work on windows as well 
 # COmmit 24 
 -- * Here we have dealt with some logical errors we made while writing the code such as if connection failed i didnt close the socket back then logical errors like this etc 
-
+#commit 25
+-- * An after deadline commit where i  have checked if my code deals with ,ax_client_capacit5y on server side here i have added the check 
