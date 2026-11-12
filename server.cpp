@@ -372,11 +372,12 @@ int64_t readResolveRecord(FILE* f, string& outText) // f is basically current po
     return offset_field;
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
+// returns byte position in binary file where main begins
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
-    FuncEntry funcArray[MAX_FUNCS];
+    FuncEntry funcArray[MAX_FUNCS]; // array to hold functions name and their byte positions 
     int32_t funcCount = 0;
-    PendingPatch patches[MAX_PATCHES];
+    PendingPatch patches[MAX_PATCHES];// track function who are called before they are defined 
     int32_t patchCount = 0;
     ifstream in(sourcePath, ios::binary);
     if (!in.is_open()) {
@@ -432,7 +433,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 }
             }
 
-            // Forward call reference -> record pending patch
+            // Forward call reference record pending patch
             if (targetOffset == -1) {
                 //  Exceeded maximum pending forward patch capacity
                 if (patchCount >= MAX_PATCHES) {
@@ -470,7 +471,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 
         // Backpatch the 8-byte targetOffset field in resolver.bin
         fseeko(f, patches[i].byteOffsetOfOffsetField, SEEK_SET);
-        fwrite(&resolvedOffset, sizeof(int64_t), 1, f);
+        fwrite(&resolvedOffset, sizeof(int64_t), 1, f); // overwrites tye initial -1 with resolvedoffset 
     }
 
     fclose(f);
@@ -485,9 +486,9 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 // PASS 0x2: EXECUTION (tokenization happens here)
 enum _TTokenType
 {
-    TOKEN_KEYWORD,
-    TOKEN_IDENTIFIER,
-    TOKEN_PARAM
+    TOKEN_KEYWORD, // instructrion is a command 
+    TOKEN_IDENTIFIER, // variable function name 
+    TOKEN_PARAM // arguments 
 };
 struct Token
 {
@@ -504,9 +505,9 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
             if (!word.empty()) {
                 if (count == maxTokens) return count;
                 tokens[count].text = word;
-                if (count == 0) tokens[count].type = TOKEN_KEYWORD;
-                else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER;
-                else tokens[count].type = TOKEN_PARAM;
+                if (count == 0) tokens[count].type = TOKEN_KEYWORD; // call instruction etc 
+                else if (count == 1) tokens[count].type = TOKEN_IDENTIFIER; // variable/function name 
+                else tokens[count].type = TOKEN_PARAM; // arguments 
 
                 count++;
                 word = "";
@@ -515,7 +516,7 @@ int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
         else {
             word += line[i];
         }
-    }
+    }// handles last word at the end of line 
     if (!word.empty() && count < maxTokens) {
         tokens[count].text = word;
         if (count == 0) tokens[count].type = TOKEN_KEYWORD;
@@ -881,7 +882,7 @@ bool sendAll(int sock, const char* buf, size_t n)
 }
 void sendServerError(int sock, const string& msg)
 {
-    char statusByte = 1;
+    char statusByte = 1; // indicating error to client 
     uint32_t crc = 0;
     crc = update_crc32(crc, &statusByte, 1);
     crc = update_crc32(crc, msg.data(), msg.size());
@@ -894,7 +895,7 @@ void sendServerError(int sock, const string& msg)
     packet.append(reinterpret_cast<const char*>(&netCrc), 4);
 
     sendAll(sock, packet.data(), packet.size());
-}
+} // [1 byte status][error message][4 bytes CRC]
 
 void sendServerSuccess(int sock, const vector<char>& tdbgData)
 {

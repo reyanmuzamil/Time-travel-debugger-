@@ -207,8 +207,8 @@ int createListenSocket(int port)
         exit(1);
     }
 
-    // Start listening for incoming connections
-    if (listen(sock, LISTEN_BACKLOG) < 0)
+    // Start listening for incoming connections (use SOMAXCONN to avoid premature OS rejection)
+    if (listen(sock, SOMAXCONN) < 0)
     {
         cerr << "Failed to listen on socket" << endl;
         close_socket(sock);
@@ -218,7 +218,7 @@ int createListenSocket(int port)
     return sock;
     // Create a TCP socket with SOCK_CLOEXEC(flag).
     // set SO_REUSEADDR so we can restart the load balancer right away.
-    // bind() to the port on any address, then listen(LISTEN_BACKLOG).
+    // bind() to the port on any address, then listen(SOMAXCONN).
     // If bind or listen fails, print the error and exit, because without this socket we cannot work.
 }
 int connectToServer(const char* host, int port)
@@ -360,6 +360,8 @@ void acceptLoop(int listenSock)
         if (pendingClients.size() >= MAX_PENDING_CLIENTS)
         {
             sendError(clientSock, "server busy, try again later");
+            shutdown(clientSock, SHUT_WR);
+            SLEEP_MS(10); // Allow OS to flush error packet before closing socket
             close_socket(clientSock);
         }
         else
@@ -371,8 +373,8 @@ void acceptLoop(int listenSock)
     //  If pendingClients.size() is already MAX_PENDING_CLIENTS: unlock, sendError "server busy, try again later",
     // else
     // Lock queueMutex.
-    //   close the client, and go on.
-    //   Otherwise enqueue the client socket.
+    //    close the client, and go on.
+    //    Otherwise enqueue the client socket.
     // Never wait for the server here, so new clients are always accepted quickly.
     // If accept() fails, print the error and keep going (do not end the thread).
 }

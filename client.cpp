@@ -33,6 +33,7 @@
 
 typedef SSIZE_T ssize_t;
 #define close_socket(s) closesocket(s)
+#define SLEEP_MS(ms) Sleep(ms)
 #define SHUT_WR SD_SEND
 #define fseeko _fseeki64
 #define ftello _ftelli64
@@ -51,11 +52,12 @@ inline void cleanupSockets() {
 #else
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/types.h>
-cd ".\x64\Debug"
 #define close_socket(s) close(s)
+#define SLEEP_MS(ms) usleep((ms) * 1000)
 #ifndef SHUT_WR
 #define SHUT_WR 1
 #endif
@@ -115,7 +117,7 @@ struct TTDBHeader
 struct TdbgReader
 {
     FILE* file;          // Store the file handle directly as a pointer 
-    TTDBHeader header; 
+    TTDBHeader header;
     vector<int64_t> index;
 };
 struct DebugSession
@@ -171,12 +173,12 @@ int connectToHost(const char* host, int port)
     // int sock is an integer value which the operator system assigns to yout TCP socket 
     int sock = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)); // AF_inet tells the OS to use ipv4 address, SOCKSTZREAM specifies reliable TCP connection 
     // 0 means let OS chose default protocol for TCP
-    if (sock <0)return -1;// socket creation fails 
+    if (sock < 0)return -1;// socket creation fails 
     struct sockaddr_in addr; // struct for storing ipv4 address and port number 
     memset(&addr, 0, sizeof(addr)); // wipes memort blovk of addr with zeros to ensure  no garbage memory interfare with address configuration
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port); // Convert port number to network byte order
-    if (inet_pton(AF_INET, host, &addr.sin_addr)<=0) { // convert and check if ip is valid or not malformed
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) { // convert and check if ip is valid or not malformed
         close_socket(sock);
         return -1;
     }// convert ip string into binary
@@ -369,16 +371,32 @@ bool requestDebugFile(const char* host, int port, const char* sourcePath, const 
         outError = "Failed to connect to load balancer at " + string(host) + ":" + to_string(port);
         return false;
     }
-    // Upload the source binary file 
-    if (!uploadSource(sock, sourcePath)) {
-        outError = "Failed to upload source file: " + string(sourcePath);
+
+    // Check immediately if Load Balancer already rejected the connection ("server busy")
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(sock, &readfds);
+    timeval tv{ 0, 20000 }; // 20 ms
+    if (select(sock + 1, &readfds, nullptr, nullptr, &tv) > 0) {
+        bool success = receiveResponse(sock, outTdbgPath, outError);
         close_socket(sock);
-        return false;
+        return success;
     }
-    //Receive the response payload and verify with checksum
+
+    // Attempt to upload the source binary file
+    bool uploaded = uploadSource(sock, sourcePath);
+
+    // Always read response (catches rejection even if it arrived during upload)
     bool success = receiveResponse(sock, outTdbgPath, outError);
     close_socket(sock);
-    return success;
+
+    if (!success) {
+        if (!uploaded && outError == "Failed to receive response status from server.") {
+            outError = "Failed to upload source file: " + string(sourcePath);
+        }
+        return false;
+    }
+    return true;
 }
 bool openTdbg(const char* path, TdbgReader& r)
 {
@@ -411,7 +429,7 @@ bool openTdbg(const char* path, TdbgReader& r)
             return false;
         }
     }
-    r.file=f;
+    r.file = f;
     return true;
 }
 void closeTdbg(TdbgReader& r)
@@ -432,9 +450,9 @@ void closeTdbg(TdbgReader& r)
 // uses the step index TO GO DIRECTLY TO Exact byte location 
 Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 {
-    if (step<0 || step>=r.header.stepCount)return nullptr; // out of bounds check
+    if (step < 0 || step >= r.header.stepCount)return nullptr; // out of bounds check
     // jump to target offset
-    if (r.file==nullptr)
+    if (r.file == nullptr)
     {
         return nullptr;
     }
@@ -459,9 +477,9 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 
         // reading function name 
         int32_t nameLen = 0;
-        if (fread(&nameLen, sizeof(int32_t), 1, f) != 1) { 
-        delete s; 
-        return nullptr; 
+        if (fread(&nameLen, sizeof(int32_t), 1, f) != 1) {
+            delete s;
+            return nullptr;
         }
         if (nameLen > 0)
         {
@@ -476,21 +494,21 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
 
         //  read return Line
         if (fread(&(frame.returnLine), sizeof(int32_t), 1, f) != 1) {
-        delete s; 
-        return nullptr;
+            delete s;
+            return nullptr;
         }
 
         //  read positional arguments 
-        if (fread(&(frame.argc), sizeof(int32_t), 1, f) != 1) { 
+        if (fread(&(frame.argc), sizeof(int32_t), 1, f) != 1) {
             delete s;
             return nullptr;
         }
         for (int32_t a = 0; a < frame.argc; a++)
         {
             int32_t argNameLen = 0;
-            if (fread(&argNameLen, sizeof(int32_t), 1, f) != 1) { 
+            if (fread(&argNameLen, sizeof(int32_t), 1, f) != 1) {
                 delete s;
-            return nullptr;
+                return nullptr;
             }
 
             if (argNameLen > 0)
@@ -504,22 +522,24 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
                 frame.argv[a].name = "";
             }
 
-            if (fread(&(frame.argv[a].value), sizeof(int32_t), 1, f) != 1) { 
-            delete s;
-            return nullptr; 
+            if (fread(&(frame.argv[a].value), sizeof(int32_t), 1, f) != 1) {
+                delete s;
+                return nullptr;
             }
         }
 
         // Read Local Variables
-        if (fread(&(frame.localCount), sizeof(int32_t), 1, f) != 1) { 
-            delete s; 
-            return nullptr; }
+        if (fread(&(frame.localCount), sizeof(int32_t), 1, f) != 1) {
+            delete s;
+            return nullptr;
+        }
         for (int32_t v = 0; v < frame.localCount; v++)
         {
             int32_t varNameLen = 0;
-            if (fread(&varNameLen, sizeof(int32_t), 1, f) != 1) { 
-            delete s; 
-            return nullptr; }
+            if (fread(&varNameLen, sizeof(int32_t), 1, f) != 1) {
+                delete s;
+                return nullptr;
+            }
 
             if (varNameLen > 0)
             {
@@ -532,9 +552,9 @@ Snapshot* readSnapshotAt(TdbgReader& r, int32_t step)
                 frame.locals[v].name = "";
             }
 
-            if (fread(&(frame.locals[v].value), sizeof(int32_t), 1, f) != 1) { 
-                delete s; 
-                return nullptr; 
+            if (fread(&(frame.locals[v].value), sizeof(int32_t), 1, f) != 1) {
+                delete s;
+                return nullptr;
             }
         }
     }
@@ -580,7 +600,7 @@ void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot& s); // defi
 
 bool showCurrent(DebugSession& s)
 {
-    Snapshot *S1 = readSnapshotAt(s.reader, s.currentStep);
+    Snapshot* S1 = readSnapshotAt(s.reader, s.currentStep);
     if (!S1) {
         cout << "\n The file is damaged";
         return false;
@@ -861,17 +881,17 @@ bool runCommand(DebugSession& s, const string& line, bool& quitRequested)
         return false;
     }
 }
-    // 1. Split the line into words.
-    // 2. If the first word is "ttdb", drop it.
-    // 3. Match the first word:
-    //      start      -> needs a path after it, then cmdStart
-    //      next       -> no more words, then cmdNext
-    //      prv        -> no more words, then cmdPrv
-    //      jmp        -> second word "next" or "prv", third word a positive number ,
-    //                    then cmdJmpNext or cmdJmpPrv
-    //      help       -> printHelp
-    //      quit, exit -> set quitRequested = true
-    // 4. For anything else, or a wrong number of words, print "unknown command" and the help text, and return false.
+// 1. Split the line into words.
+// 2. If the first word is "ttdb", drop it.
+// 3. Match the first word:
+//      start      -> needs a path after it, then cmdStart
+//      next       -> no more words, then cmdNext
+//      prv        -> no more words, then cmdPrv
+//      jmp        -> second word "next" or "prv", third word a positive number ,
+//                    then cmdJmpNext or cmdJmpPrv
+//      help       -> printHelp
+//      quit, exit -> set quitRequested = true
+// 4. For anything else, or a wrong number of words, print "unknown command" and the help text, and return false.
 int main(int argc, char* argv[])
 {
     if (argc >= 2)
@@ -901,7 +921,7 @@ int main(int argc, char* argv[])
         {
             // End of input stream (EOF / Ctrl+D)
             break;
-        }   
+        }
         runCommand(session, inputLine, quitRequested);
     }
 

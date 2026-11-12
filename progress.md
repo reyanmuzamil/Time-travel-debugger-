@@ -70,3 +70,5 @@
 -- * Here we have dealt with some logical errors we made while writing the code such as if connection failed i didnt close the socket back then logical errors like this etc 
 #commit 25
 -- * An after deadline commit where i  have checked if my code deals with ,ax_client_capacit5y on server side here i have added the check 
+# COMMIT 26 
+-- * hOPEFULLY LAST COMMIT WHERE I ADDED SOME CHECKS AND SCENES TO DEAL WITH OUTPUT ON TERMINAL AND TESTING SOME FUNCTIONS AS WELL 
